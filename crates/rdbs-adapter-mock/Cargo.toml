@@ -1,0 +1,19 @@
+[package]
+name = "rdbs-adapter-mock"
+description = "In-memory mock DatabaseAdapter used by Milestone 1 and tests."
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+rdbs-core.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true }
+
+[lints]
+workspace = true

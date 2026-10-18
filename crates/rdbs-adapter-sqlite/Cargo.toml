@@ -1,0 +1,21 @@
+[package]
+name = "rdbs-adapter-sqlite"
+description = "SQLite adapter for Zephix (rusqlite, bundled SQLite)."
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+rdbs-core.workspace = true
+tokio.workspace = true
+rusqlite = { workspace = true, features = ["column_decltype", "backup"] }
+tracing.workspace = true
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true }

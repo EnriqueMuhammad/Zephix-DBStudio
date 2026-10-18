@@ -1,0 +1,26 @@
+[package]
+name = "rdbs-drivers"
+description = "Routes connection profiles to the matching database adapter."
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+rdbs-core.workspace = true
+rdbs-adapter-postgres.workspace = true
+rdbs-adapter-mysql.workspace = true
+rdbs-adapter-mssql.workspace = true
+rdbs-adapter-sqlite.workspace = true
+rdbs-adapter-oracle.workspace = true
+rdbs-adapter-mongodb.workspace = true
+rdbs-adapter-redis.workspace = true
+rdbs-ssh.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
+
+[lints]
+workspace = true

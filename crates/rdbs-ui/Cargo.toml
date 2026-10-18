@@ -1,0 +1,29 @@
+[package]
+name = "rdbs-ui"
+description = "egui user interface for Zephix: theme, explorer, dock workspace, editor, grid, dialogs."
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+rdbs-core.workspace = true
+rdbs-services.workspace = true
+rdbs-transfer.workspace = true
+rdbs-storage.workspace = true
+eframe.workspace = true
+egui.workspace = true
+egui_extras.workspace = true
+egui_dock.workspace = true
+egui-phosphor.workspace = true
+rfd.workspace = true
+serde.workspace = true
+uuid.workspace = true
+chrono = { workspace = true, features = ["clock"] }
+directories.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true

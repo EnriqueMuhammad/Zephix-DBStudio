@@ -1,0 +1,163 @@
+//! DDL reconstruction from the PostgreSQL catalogs (there is no `SHOW CREATE TABLE`).
+
+use rdbs_core::dialect::{qualified_name, quote_identifier};
+use rdbs_core::schema::ObjectPath;
+use rdbs_core::{DatabaseKind, DbError, DbErrorKind, ObjectKind};
+use tokio_postgres::Client;
+
+use crate::catalog::{col, text_rows};
+
+const PG: DatabaseKind = DatabaseKind::PostgreSql;
+
+/// Single-quoted SQL string literal.
+fn lit(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "''"))
+}
+
+fn not_found(object: &ObjectPath) -> DbError {
+    DbError::new(DbErrorKind::Query, format!("{} was not found", object.name))
+}
+
+/// `CREATE …` statement(s) for `object`.
+pub async fn object_ddl(client: &Client, object: &ObjectPath) -> Result<String, DbError> {
+    let schema = object.schema.as_deref().unwrap_or("public");
+    let qualified = qualified_name(PG, None, Some(schema), &object.name);
+    match object.kind {
+        ObjectKind::Table => table_ddl(client, schema, &object.name, &qualified).await,
+        ObjectKind::View | ObjectKind::MaterializedView => {
+            let rows = text_rows(
+                client,
+                &format!(
+                    "SELECT pg_get_viewdef(c.oid, true), c.relkind::text FROM pg_class c \
+                     JOIN pg_namespace n ON n.oid = c.relnamespace \
+                     WHERE n.nspname = {} AND c.relname = {}",
+                    lit(schema),
+                    lit(&object.name)
+                ),
+            )
+            .await?;
+            let row = rows.first().ok_or_else(|| not_found(object))?;
+            let head = if col(row, 1) == "m" {
+                "CREATE MATERIALIZED VIEW"
+            } else {
+                "CREATE OR REPLACE VIEW"
+            };
+            Ok(format!("{head} {qualified} AS\n{}", col(row, 0).trim_end()))
+        }
+        ObjectKind::Function | ObjectKind::Procedure => {
+            let rows = text_rows(
+                client,
+                &format!(
+                    "SELECT pg_get_functiondef(p.oid) FROM pg_proc p \
+                     JOIN pg_namespace n ON n.oid = p.pronamespace \
+                     WHERE n.nspname = {} AND p.proname = {} ORDER BY p.oid",
+                    lit(schema),
+                    lit(&object.name)
+                ),
+            )
+            .await?;
+            if rows.is_empty() {
+                return Err(not_found(object));
+            }
+            Ok(rows
+                .iter()
+                .map(|r| format!("{};", col(r, 0).trim_end()))
+                .collect::<Vec<_>>()
+                .join("\n\n"))
+        }
+        _ => Err(DbError::new(
+            DbErrorKind::Unsupported,
+            "DDL is available for tables, views and routines",
+        )),
+    }
+}
+
+async fn table_ddl(
+    client: &Client,
+    schema: &str,
+    name: &str,
+    qualified: &str,
+) -> Result<String, DbError> {
+    let oid_rows = text_rows(
+        client,
+        &format!(
+            "SELECT c.oid FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
+             WHERE n.nspname = {} AND c.relname = {} AND c.relkind IN ('r','p')",
+            lit(schema),
+            lit(name)
+        ),
+    )
+    .await?;
+    let oid = oid_rows
+        .first()
+        .map(|r| col(r, 0))
+        .filter(|o| !o.is_empty())
+        .ok_or_else(|| DbError::new(DbErrorKind::Query, format!("table {name} was not found")))?;
+
+    let columns = text_rows(
+        client,
+        &format!(
+            "SELECT a.attname, format_type(a.atttypid, a.atttypmod), a.attnotnull::text, \
+                    pg_get_expr(d.adbin, d.adrelid), a.attidentity::text, a.attgenerated::text \
+             FROM pg_attribute a \
+             LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum \
+             WHERE a.attrelid = {oid} AND a.attnum > 0 AND NOT a.attisdropped \
+             ORDER BY a.attnum"
+        ),
+    )
+    .await?;
+    let constraints = text_rows(
+        client,
+        &format!(
+            "SELECT conname, pg_get_constraintdef(oid, true) FROM pg_constraint \
+             WHERE conrelid = {oid} \
+             ORDER BY CASE contype WHEN 'p' THEN 0 WHEN 'u' THEN 1 WHEN 'c' THEN 2 ELSE 3 END, conname"
+        ),
+    )
+    .await?;
+    let indexes = text_rows(
+        client,
+        &format!(
+            "SELECT pg_get_indexdef(i.indexrelid) FROM pg_index i \
+             WHERE i.indrelid = {oid} \
+               AND NOT EXISTS (SELECT 1 FROM pg_constraint c WHERE c.conindid = i.indexrelid) \
+             ORDER BY i.indexrelid"
+        ),
+    )
+    .await?;
+
+    let mut lines: Vec<String> = columns
+        .iter()
+        .map(|r| {
+            let mut line = format!("    {} {}", quote_identifier(PG, &col(r, 0)), col(r, 1));
+            match (col(r, 4).as_str(), col(r, 5).as_str()) {
+                ("a", _) => line.push_str(" GENERATED ALWAYS AS IDENTITY"),
+                ("d", _) => line.push_str(" GENERATED BY DEFAULT AS IDENTITY"),
+                (_, "s") => line.push_str(&format!(" GENERATED ALWAYS AS ({}) STORED", col(r, 3))),
+                _ => {
+                    let default = col(r, 3);
+                    if !default.is_empty() {
+                        line.push_str(&format!(" DEFAULT {default}"));
+                    }
+                }
+            }
+            if col(r, 2) == "true" {
+                line.push_str(" NOT NULL");
+            }
+            line
+        })
+        .collect();
+    lines.extend(constraints.iter().map(|r| {
+        format!(
+            "    CONSTRAINT {} {}",
+            quote_identifier(PG, &col(r, 0)),
+            col(r, 1)
+        )
+    }));
+
+    let mut out = format!("CREATE TABLE {qualified} (\n{}\n);", lines.join(",\n"));
+    for r in &indexes {
+        out.push_str(&format!("\n\n{};", col(r, 0)));
+    }
+    Ok(out)
+}

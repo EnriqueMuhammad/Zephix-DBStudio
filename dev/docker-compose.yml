@@ -1,0 +1,65 @@
+# Throw-away database servers for Zephix integration tests.
+#   ssh-keygen -t ed25519 -N "" -C rdbs-it -f dev/ssh/test_key    (once; see dev/ssh/README.md)
+#   docker compose -f dev/docker-compose.yml up -d --build
+#   RDBS_IT=1 cargo test --workspace -- --test-threads=1
+# Ports are offset (5xxxx) so they do not clash with locally installed servers.
+name: rdbs-it
+
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_PASSWORD: rdbs_test_pw
+      POSTGRES_DB: rdbs_test
+    ports: ["55432:5432"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d rdbs_test"]
+      interval: 2s
+      retries: 30
+
+  mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_ROOT_PASSWORD: rdbs_test_pw
+      MYSQL_DATABASE: rdbs_test
+    ports: ["53306:3306"]
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-prdbs_test_pw"]
+      interval: 3s
+      retries: 40
+
+  mssql:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_SA_PASSWORD: Rdbs_Test_Pw_2026!
+      MSSQL_PID: Developer
+    ports: ["51433:1433"]
+
+  redis:
+    image: redis:7.4-alpine
+    command: ["redis-server", "--requirepass", "rdbs_test_pw"]
+    ports: ["56379:6379"]
+
+  mongo:
+    image: mongo:8.0
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: root
+      MONGO_INITDB_ROOT_PASSWORD: rdbs_test_pw
+    ports: ["57017:27017"]
+
+  # Oracle Database Free (large image; start explicitly: --profile oracle up -d oracle).
+  # The client side needs Oracle Instant Client on PATH.
+  oracle:
+    image: gvenzl/oracle-free:23-slim
+    profiles: ["oracle"]
+    environment:
+      ORACLE_PASSWORD: rdbs_test_pw
+      APP_USER: rdbs
+      APP_USER_PASSWORD: rdbs_test_pw
+    ports: ["51521:1521"]
+
+  # SSH bastion that can reach the services above by name (postgres:5432, mysql:3306, …).
+  ssh:
+    build: ./ssh
+    ports: ["52222:22"]

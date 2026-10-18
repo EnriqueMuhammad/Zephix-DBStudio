@@ -1,0 +1,25 @@
+[package]
+name = "rdbs-adapter-postgres"
+description = "PostgreSQL adapter for Zephix (tokio-postgres)."
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+rdbs-core.workspace = true
+tokio.workspace = true
+tokio-postgres.workspace = true
+tokio-postgres-rustls.workspace = true
+rustls.workspace = true
+rustls-native-certs.workspace = true
+futures-util.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true }

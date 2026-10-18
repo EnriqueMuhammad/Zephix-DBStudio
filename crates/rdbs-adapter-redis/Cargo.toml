@@ -1,0 +1,22 @@
+[package]
+name = "rdbs-adapter-redis"
+description = "Redis adapter for Zephix (redis-rs)."
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+rdbs-core.workspace = true
+tokio.workspace = true
+redis.workspace = true
+rustls.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true }
+
+[lints]
+workspace = true

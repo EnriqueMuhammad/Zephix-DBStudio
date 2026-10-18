@@ -1,0 +1,112 @@
+[workspace]
+resolver = "3"
+members = [
+    "apps/zephix",
+    "crates/rdbs-core",
+    "crates/rdbs-storage",
+    "crates/rdbs-services",
+    "crates/rdbs-adapter-mock",
+    "crates/rdbs-ui",
+    "crates/rdbs-adapter-postgres",
+    "crates/rdbs-adapter-mysql",
+    "crates/rdbs-adapter-mssql",
+    "crates/rdbs-drivers",
+    "crates/rdbs-ssh",
+    "crates/rdbs-adapter-sqlite",
+    "crates/rdbs-transfer",
+    "crates/rdbs-adapter-redis",
+    "crates/rdbs-adapter-mongodb",
+    "crates/rdbs-adapter-oracle",
+]
+
+[workspace.package]
+version = "0.1.0"
+authors = ["Enrique Muhammad Ilham"]
+edition = "2024"
+rust-version = "1.95"
+license = "PolyForm-Noncommercial-1.0.0"
+publish = false
+
+[workspace.dependencies]
+# Internal crates
+rdbs-core = { path = "crates/rdbs-core" }
+rdbs-storage = { path = "crates/rdbs-storage" }
+rdbs-services = { path = "crates/rdbs-services" }
+rdbs-adapter-mock = { path = "crates/rdbs-adapter-mock" }
+rdbs-ui = { path = "crates/rdbs-ui" }
+rdbs-adapter-postgres = { path = "crates/rdbs-adapter-postgres" }
+rdbs-adapter-mysql = { path = "crates/rdbs-adapter-mysql" }
+rdbs-adapter-mssql = { path = "crates/rdbs-adapter-mssql" }
+rdbs-drivers = { path = "crates/rdbs-drivers" }
+rdbs-ssh = { path = "crates/rdbs-ssh" }
+rdbs-adapter-sqlite = { path = "crates/rdbs-adapter-sqlite" }
+rdbs-transfer = { path = "crates/rdbs-transfer" }
+rdbs-adapter-redis = { path = "crates/rdbs-adapter-redis" }
+rdbs-adapter-mongodb = { path = "crates/rdbs-adapter-mongodb" }
+rdbs-adapter-oracle = { path = "crates/rdbs-adapter-oracle" }
+
+# GUI
+eframe = { version = "0.36", default-features = false, features = [
+    "default_fonts",
+    "glow",
+    "persistence",
+    "accesskit",
+    "links",
+    "wayland",
+    "x11",
+] }
+egui = { version = "0.36", features = ["serde"] }
+egui_extras = { version = "0.36" }
+egui_dock = { version = "0.21", features = ["serde"] }
+egui-phosphor = "0.14"
+rfd = "0.17"
+
+# Runtime / plumbing
+tokio = { version = "1.53", features = ["rt-multi-thread", "sync", "time", "macros"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+directories = "6"
+uuid = { version = "1", features = ["v4", "serde"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
+keyring = "4"
+roxmltree = "0.20"
+winresource = "0.1"
+csv = "1.4"
+calamine = { version = "0.36", features = ["dates"] }
+encoding_rs = "0.8"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+tokio-util = { version = "0.7", features = ["compat"] }
+
+# Database drivers (ADR 0004). TLS uses rustls with the `ring` provider everywhere.
+tokio-postgres = "0.7"
+tokio-postgres-rustls = "0.14"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-native-certs = "0.8"
+mysql_async = { version = "0.37", default-features = false, features = ["default-rustls-ring"] }
+tiberius = { version = "0.13", default-features = false, features = ["tds73", "rustls", "chrono"] }
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+redis = { version = "1.7", default-features = false, features = ["tokio-comp", "tokio-rustls-comp", "tls-rustls-insecure"] }
+mongodb = "3.9"
+oracle = "0.6"
+russh = { version = "0.64", default-features = false, features = ["ring", "rsa", "flate2"] }
+
+[profile.release]
+# Smaller, faster zephix.exe.
+lto = "thin"
+codegen-units = 1
+strip = true
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+unwrap_used = "warn"
+expect_used = "warn"
+
+[profile.dev.package."*"]
+# Dependencies are optimised even in debug builds so the UI stays responsive.
+opt-level = 2

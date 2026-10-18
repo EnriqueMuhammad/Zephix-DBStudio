@@ -1,0 +1,21 @@
+[package]
+name = "rdbs-adapter-oracle"
+description = "Oracle adapter for Zephix (rust-oracle; needs Oracle Instant Client at run time)."
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+rdbs-core.workspace = true
+tokio.workspace = true
+oracle.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true }
+
+[lints]
+workspace = true

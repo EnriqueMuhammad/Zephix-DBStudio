@@ -1,0 +1,18 @@
+[package]
+name = "rdbs-ssh"
+description = "SSH tunnels (local port forwarding) for Zephix connections."
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+rdbs-core.workspace = true
+russh.workspace = true
+tokio = { workspace = true, features = ["net", "io-util"] }
+tracing.workspace = true
+
+[lints]
+workspace = true

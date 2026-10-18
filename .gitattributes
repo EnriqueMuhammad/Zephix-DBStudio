@@ -1,0 +1,19 @@
+# Normalize text files in the repository; check out with the platform's line endings.
+* text=auto
+
+# Windows-native files keep CRLF.
+*.ps1 text eol=crlf
+
+# Shell scripts and container files stay LF (they run inside Linux containers).
+*.sh text eol=lf
+Dockerfile text eol=lf
+
+# Binary assets.
+*.ico binary
+*.png binary
+*.xlsx binary
+*.xls binary
+*.ods binary
+*.wxs text eol=crlf
+*.msi binary
+*.exe binary

@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Per-user MSI for Zephix - Database Management Studio (WiX 5).
+
+  Installs to %LOCALAPPDATA%\Programs\Zephix without administrator rights, with a Start menu
+  entry. Every version is a major upgrade of the last one (same UpgradeCode); downgrades are
+  refused. Profiles, settings and saved passwords (OS keychain) are never touched, also not on
+  uninstall.
+
+  Built by scripts/release.ps1:
+    dotnet tool run wix build installer/Zephix.wxs -arch x64
+      -d Version=0.1.0 -d ExePath=<zephix.exe> -d IconPath=apps/zephix/assets/zephix.ico
+      -o dist/Zephix-0.1.0-x64.msi
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="Zephix - Database Management Studio"
+           Manufacturer="Enrique Muhammad Ilham"
+           Version="$(Version)"
+           UpgradeCode="B9DF7A1A-D388-419F-9E1D-F2E381A12A3F"
+           Scope="perUser"
+           Compressed="yes"
+           Language="1033">
+    <SummaryInformation Description="Zephix - Database Management Studio $(Version) installer" />
+
+    <MajorUpgrade DowngradeErrorMessage="A newer version of Zephix is already installed." />
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+
+    <Icon Id="AppIcon" SourceFile="$(IconPath)" />
+    <Property Id="ARPPRODUCTICON" Value="AppIcon" />
+    <Property Id="ARPNOMODIFY" Value="1" />
+    <Property Id="ARPNOREPAIR" Value="1" />
+
+    <StandardDirectory Id="LocalAppDataFolder">
+      <Directory Id="ProgramsFolder" Name="Programs">
+        <Directory Id="INSTALLFOLDER" Name="Zephix" />
+      </Directory>
+    </StandardDirectory>
+    <StandardDirectory Id="ProgramMenuFolder" />
+
+    <!-- Per-user components use an HKCU value as key path (ICE38) and remove their folders (ICE64). -->
+    <Component Id="MainExecutable" Directory="INSTALLFOLDER" Guid="3AEB0658-E002-4DC5-921B-51A3652B3DCA">
+      <File Id="ZephixExe" Name="zephix.exe" Source="$(ExePath)" KeyPath="no" />
+      <RegistryValue Root="HKCU" Key="Software\Zephix" Name="InstallDir"
+                     Type="string" Value="[INSTALLFOLDER]" KeyPath="yes" />
+      <RegistryValue Root="HKCU" Key="Software\Zephix" Name="Version"
+                     Type="string" Value="$(Version)" />
+      <RemoveFolder Id="RemoveInstallFolder" Directory="INSTALLFOLDER" On="uninstall" />
+      <RemoveFolder Id="RemoveProgramsFolder" Directory="ProgramsFolder" On="uninstall" />
+    </Component>
+
+    <Component Id="StartMenuShortcut" Directory="ProgramMenuFolder">
+      <Shortcut Id="StartMenuEntry" Name="Zephix"
+                Description="Database Management Studio"
+                Target="[INSTALLFOLDER]zephix.exe" WorkingDirectory="INSTALLFOLDER" Icon="AppIcon" />
+      <RegistryValue Root="HKCU" Key="Software\Zephix" Name="StartMenuShortcut"
+                     Type="integer" Value="1" KeyPath="yes" />
+    </Component>
+
+    <Feature Id="Main" Title="Zephix">
+      <ComponentRef Id="MainExecutable" />
+      <ComponentRef Id="StartMenuShortcut" />
+    </Feature>
+  </Package>
+</Wix>

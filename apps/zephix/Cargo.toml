@@ -1,0 +1,30 @@
+[package]
+name = "zephix"
+description = "Zephix - Database Management Studio (desktop application)."
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+build = "build.rs"
+
+[[bin]]
+name = "zephix"
+path = "src/main.rs"
+
+[dependencies]
+rdbs-ui.workspace = true
+rdbs-core.workspace = true
+rdbs-drivers.workspace = true
+rdbs-storage.workspace = true
+rdbs-adapter-mock.workspace = true
+eframe.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[target.'cfg(windows)'.build-dependencies]
+winresource.workspace = true
+
+[lints]
+workspace = true

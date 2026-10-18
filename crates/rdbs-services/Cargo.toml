@@ -1,0 +1,21 @@
+[package]
+name = "rdbs-services"
+description = "Background worker that executes typed commands off the UI thread and reports events."
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+rdbs-core.workspace = true
+rdbs-transfer.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+rdbs-adapter-mock.workspace = true
+
+[lints]
+workspace = true

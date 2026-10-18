@@ -1,0 +1,25 @@
+[package]
+name = "rdbs-adapter-mssql"
+description = "Microsoft SQL Server adapter for Zephix (tiberius)."
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+rdbs-core.workspace = true
+tokio = { workspace = true, features = ["net"] }
+tokio-util.workspace = true
+tiberius.workspace = true
+chrono.workspace = true
+futures-util.workspace = true
+tracing.workspace = true
+roxmltree.workspace = true
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true }

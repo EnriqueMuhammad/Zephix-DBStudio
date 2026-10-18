@@ -1,0 +1,23 @@
+[package]
+name = "rdbs-adapter-mysql"
+description = "MySQL / MariaDB adapter for Zephix (mysql_async)."
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+rdbs-core.workspace = true
+tokio.workspace = true
+mysql_async.workspace = true
+rustls.workspace = true
+futures-util.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true }

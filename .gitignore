@@ -1,0 +1,7 @@
+/target
+*.db
+*.db-journal
+# Test SSH key pair, generated per machine (dev/ssh/README.md)
+/dev/ssh/test_key
+/dev/ssh/test_key.pub
+/dist

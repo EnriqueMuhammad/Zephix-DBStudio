@@ -1,0 +1,30 @@
+[package]
+name = "rdbs-transfer"
+description = "Import, cross-server data transfer/sync and logical backups for Zephix."
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+rdbs-core.workspace = true
+csv.workspace = true
+calamine.workspace = true
+encoding_rs.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+chrono = { workspace = true, features = ["clock"] }
+
+[dev-dependencies]
+tokio = { workspace = true }
+rdbs-adapter-sqlite.workspace = true
+rdbs-adapter-postgres.workspace = true
+rdbs-adapter-mysql.workspace = true
+rdbs-adapter-mssql.workspace = true
+rust_xlsxwriter = "0.99"
+
+[lints]
+workspace = true
