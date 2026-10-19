@@ -22,6 +22,7 @@ pub mod job;
 pub mod message;
 pub mod plan;
 pub mod profile;
+pub mod routine;
 pub mod schema;
 pub mod sql;
 pub mod table;

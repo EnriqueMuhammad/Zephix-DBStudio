@@ -161,3 +161,63 @@ async fn table_ddl(
     }
     Ok(out)
 }
+
+/// Parameters of a function or procedure (the first overload when the name is overloaded).
+pub async fn routine_signature(
+    client: &Client,
+    object: &ObjectPath,
+) -> Result<rdbs_core::routine::RoutineSignature, DbError> {
+    use rdbs_core::routine::{ParamMode, RoutineParam, RoutineSignature};
+    let schema = object.schema.as_deref().unwrap_or("public");
+    // Unit separator between list items: never part of a name or a type.
+    let rows = text_rows(
+        client,
+        &format!(
+            "SELECT p.proretset::text, \
+                    COALESCE(array_to_string(p.proargnames, chr(31)), ''), \
+                    COALESCE(array_to_string(p.proargmodes, chr(31)), ''), \
+                    COALESCE((SELECT string_agg(format_type(t, NULL), chr(31) ORDER BY ord) \
+                              FROM unnest(COALESCE(p.proallargtypes, p.proargtypes::oid[])) \
+                                   WITH ORDINALITY AS u(t, ord)), '') \
+             FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace \
+             WHERE n.nspname = {} AND p.proname = {} ORDER BY p.oid LIMIT 1",
+            lit(schema),
+            lit(&object.name)
+        ),
+    )
+    .await?;
+    let row = rows.first().ok_or_else(|| not_found(object))?;
+    let split = |s: String| -> Vec<String> {
+        if s.is_empty() {
+            Vec::new()
+        } else {
+            s.split('\u{1f}').map(str::to_owned).collect()
+        }
+    };
+    let names = split(col(row, 1));
+    let modes = split(col(row, 2));
+    let types = split(col(row, 3));
+    let mut returns_table = col(row, 0) == "true";
+    let mut params = Vec::new();
+    for (i, data_type) in types.into_iter().enumerate() {
+        let mode = match modes.get(i).map(String::as_str) {
+            Some("o") => ParamMode::Out,
+            Some("b") => ParamMode::InOut,
+            // Columns of RETURNS TABLE (...): results, not parameters.
+            Some("t") => {
+                returns_table = true;
+                continue;
+            }
+            _ => ParamMode::In,
+        };
+        params.push(RoutineParam {
+            name: names.get(i).cloned().unwrap_or_default(),
+            data_type,
+            mode,
+        });
+    }
+    Ok(RoutineSignature {
+        params,
+        returns_table,
+    })
+}

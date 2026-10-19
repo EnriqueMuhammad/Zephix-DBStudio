@@ -190,6 +190,40 @@ impl DatabaseAdapter for MockAdapter {
         })
     }
 
+    fn object_ddl<'a>(
+        &'a mut self,
+        object: &'a rdbs_core::schema::ObjectPath,
+    ) -> BoxFuture<'a, Result<String, DbError>> {
+        Box::pin(async move {
+            tokio::time::sleep(self.query_latency / 2).await;
+            if object.kind == rdbs_core::ObjectKind::Table {
+                let table = sample_tables(self.kind, object.schema.as_deref())
+                    .into_iter()
+                    .find(|t| t.name == object.name);
+                if let Some(t) = table {
+                    return Ok(rdbs_core::ddlgen::script(&rdbs_core::ddlgen::create_table(
+                        self.kind, &t,
+                    )));
+                }
+            }
+            data::sample_routine_ddl(self.kind, object).ok_or_else(|| {
+                DbError::new(DbErrorKind::Query, format!("{} was not found", object.name))
+            })
+        })
+    }
+
+    fn routine_signature<'a>(
+        &'a mut self,
+        object: &'a rdbs_core::schema::ObjectPath,
+    ) -> BoxFuture<'a, Result<rdbs_core::routine::RoutineSignature, DbError>> {
+        Box::pin(async move {
+            tokio::time::sleep(self.query_latency / 2).await;
+            data::sample_routine(&object.name).ok_or_else(|| {
+                DbError::new(DbErrorKind::Query, format!("{} was not found", object.name))
+            })
+        })
+    }
+
     fn describe_schema<'a>(
         &'a mut self,
         schema: Option<&'a str>,

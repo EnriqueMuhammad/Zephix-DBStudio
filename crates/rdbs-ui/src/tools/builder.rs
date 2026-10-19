@@ -264,7 +264,9 @@ impl Builder {
 
     fn cards(&mut self, ui: &mut Ui) {
         if self.model.tables.is_empty() {
-            ui.label(RichText::new("Add tables from the list on the left.").color(color::TEXT_DIM));
+            ui.label(
+                RichText::new("Add tables from the list on the left.").color(color::text_dim()),
+            );
             return;
         }
         let mut remove = None;
@@ -381,7 +383,7 @@ impl Builder {
             .spacing([8.0, 3.0])
             .show(ui, |ui| {
                 for h in ["Column", "Alias", "Aggregate", "Sort", ""] {
-                    ui.label(RichText::new(h).color(color::TEXT_DIM));
+                    ui.label(RichText::new(h).color(color::text_dim()));
                 }
                 ui.end_row();
                 for (i, c) in self.model.columns.iter_mut().enumerate() {

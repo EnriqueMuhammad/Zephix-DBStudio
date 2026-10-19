@@ -24,7 +24,7 @@ pub fn preview(sql: &str, max_chars: usize) -> String {
 /// Renders the history tab. `filter` is the tab's search text.
 pub fn show(ui: &mut Ui, filter: &mut String, cx: &mut TabContext<'_>) {
     egui::Frame::new()
-        .fill(color::PANEL)
+        .fill(color::panel())
         .inner_margin(egui::Margin::symmetric(8, 6))
         .show(ui, |ui| {
             ui.horizontal(|ui| {
@@ -45,7 +45,7 @@ pub fn show(ui: &mut Ui, filter: &mut String, cx: &mut TabContext<'_>) {
                         n => format!("{} entries", format_count(n as u64)),
                     })
                     .small()
-                    .color(color::TEXT_FAINT),
+                    .color(color::text_faint()),
                 );
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     if ui
@@ -67,13 +67,13 @@ pub fn show(ui: &mut Ui, filter: &mut String, cx: &mut TabContext<'_>) {
             ui.label(
                 RichText::new(icon::CLOCK)
                     .size(30.0)
-                    .color(color::TEXT_FAINT),
+                    .color(color::text_faint()),
             );
-            ui.label(RichText::new("No queries yet").color(color::TEXT_DIM));
+            ui.label(RichText::new("No queries yet").color(color::text_dim()));
             ui.label(
                 RichText::new("Executed scripts appear here; double-click one to reopen it")
                     .small()
-                    .color(color::TEXT_FAINT),
+                    .color(color::text_faint()),
             );
         });
         return;
@@ -108,7 +108,7 @@ pub fn show(ui: &mut Ui, filter: &mut String, cx: &mut TabContext<'_>) {
                 };
                 let e = &h.entry;
                 row.col(|ui| {
-                    ui.label(RichText::new(&h.executed_at).color(color::TEXT_DIM));
+                    ui.label(RichText::new(&h.executed_at).color(color::text_dim()));
                 });
                 row.col(|ui| {
                     match &e.database {
@@ -118,9 +118,9 @@ pub fn show(ui: &mut Ui, filter: &mut String, cx: &mut TabContext<'_>) {
                 });
                 row.col(|ui| {
                     let (glyph, c) = match e.status {
-                        HistoryStatus::Ok => (icon::CHECK_CIRCLE, color::SUCCESS),
-                        HistoryStatus::Error => (icon::X_CIRCLE, color::DANGER),
-                        HistoryStatus::Cancelled => (icon::PROHIBIT, color::WARNING),
+                        HistoryStatus::Ok => (icon::CHECK_CIRCLE, color::success()),
+                        HistoryStatus::Error => (icon::X_CIRCLE, color::danger()),
+                        HistoryStatus::Cancelled => (icon::PROHIBIT, color::warning()),
                     };
                     let label = ui.label(RichText::new(glyph).color(c));
                     if let Some(err) = &e.error {
@@ -132,13 +132,13 @@ pub fn show(ui: &mut Ui, filter: &mut String, cx: &mut TabContext<'_>) {
                         RichText::new(format_duration(std::time::Duration::from_millis(
                             e.elapsed_ms,
                         )))
-                        .color(color::TEXT_DIM),
+                        .color(color::text_dim()),
                     );
                 });
                 row.col(|ui| {
                     ui.label(
                         RichText::new(e.rows.map(format_count).unwrap_or_default())
-                            .color(color::TEXT_DIM),
+                            .color(color::text_dim()),
                     );
                 });
                 row.col(|ui| {

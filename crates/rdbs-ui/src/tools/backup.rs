@@ -201,7 +201,7 @@ impl Backup {
                          password in the OS keychain to run unattended.",
                     )
                     .small()
-                    .color(color::TEXT_FAINT),
+                    .color(color::text_faint()),
                 );
                 ui.add_space(6.0);
                 self.schedule_list(ui, cx);
@@ -215,7 +215,7 @@ impl Backup {
     fn schedule_list(&mut self, ui: &mut Ui, cx: &mut TabContext<'_>) {
         let schedules = cx.backups.schedules.clone();
         if schedules.is_empty() {
-            ui.label(RichText::new("No scheduled backups yet.").color(color::TEXT_DIM));
+            ui.label(RichText::new("No scheduled backups yet.").color(color::text_dim()));
             return;
         }
         ScrollArea::vertical()
@@ -235,7 +235,7 @@ impl Backup {
                             "Last result",
                             "",
                         ] {
-                            ui.label(RichText::new(h).strong().color(color::TEXT_DIM));
+                            ui.label(RichText::new(h).strong().color(color::text_dim()));
                         }
                         ui.end_row();
                         for s in &schedules {
@@ -289,7 +289,7 @@ impl Backup {
                                             icon::CHECK_CIRCLE,
                                             when(s.last_run)
                                         ))
-                                        .color(color::SUCCESS),
+                                        .color(color::success()),
                                     )
                                     .on_hover_text(summary);
                                 }
@@ -300,12 +300,12 @@ impl Backup {
                                             icon::WARNING,
                                             when(s.last_run)
                                         ))
-                                        .color(color::DANGER),
+                                        .color(color::danger()),
                                     )
                                     .on_hover_text(e);
                                 }
                                 (None, None) => {
-                                    ui.label(RichText::new("never run").color(color::TEXT_FAINT));
+                                    ui.label(RichText::new("never run").color(color::text_faint()));
                                 }
                             }
                             ui.horizontal(|ui| {
@@ -390,7 +390,7 @@ impl Backup {
                     ui.label(
                         RichText::new("{date} and {time} are replaced by the start time")
                             .small()
-                            .color(color::TEXT_FAINT),
+                            .color(color::text_faint()),
                     );
                 });
                 ui.end_row();
@@ -405,7 +405,7 @@ impl Backup {
                 ui.label("Keep");
                 ui.horizontal(|ui| {
                     ui.add(DragValue::new(&mut form.keep).range(0..=1000));
-                    ui.label(RichText::new("newest files (0 = keep all)").color(color::TEXT_DIM));
+                    ui.label(RichText::new("newest files (0 = keep all)").color(color::text_dim()));
                 });
                 ui.end_row();
 
@@ -536,11 +536,10 @@ impl Backup {
         if let Some(result) = &cx.backups.adhoc_result {
             match result {
                 Ok(s) => ui.label(
-                    RichText::new(format!("{}  {s}", icon::CHECK_CIRCLE)).color(color::SUCCESS),
+                    RichText::new(format!("{}  {s}", icon::CHECK_CIRCLE)).color(color::success()),
                 ),
-                Err(e) => {
-                    ui.label(RichText::new(format!("{}  {e}", icon::WARNING)).color(color::DANGER))
-                }
+                Err(e) => ui
+                    .label(RichText::new(format!("{}  {e}", icon::WARNING)).color(color::danger())),
             };
         }
     }

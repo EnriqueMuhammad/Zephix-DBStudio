@@ -107,6 +107,19 @@ pub enum Command {
         /// Password entered for this session; `None` uses the credential store.
         password: Option<String>,
     },
+    /// Fetch the parameters of a function or procedure.
+    GetRoutine {
+        /// Correlation id.
+        request_id: RequestId,
+        /// Connection.
+        profile: ConnectionProfile,
+        /// Database override (session), as for [`Command::Execute`].
+        database: Option<String>,
+        /// The routine.
+        object: crate::schema::ObjectPath,
+        /// Password entered for this session; `None` uses the credential store.
+        password: Option<String>,
+    },
     /// Describe the tables of a database (table designer, schema diff, ER diagram, transfer).
     DescribeSchema {
         /// Correlation id.
@@ -287,6 +300,13 @@ pub enum Event {
         request_id: RequestId,
         /// Outcome.
         result: Result<String, DbError>,
+    },
+    /// Result of [`Command::GetRoutine`].
+    RoutineLoaded {
+        /// Correlation id.
+        request_id: RequestId,
+        /// Outcome.
+        result: Result<crate::routine::RoutineSignature, DbError>,
     },
     /// Result of [`Command::DescribeSchema`].
     SchemaDescribed {

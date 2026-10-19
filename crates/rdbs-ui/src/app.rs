@@ -32,6 +32,8 @@ const REFRESHING: &str = "Refreshing objects…";
 /// Storage key of the persisted [`Workspace`] (separate keys keep demo tabs out of live mode).
 const WORKSPACE_KEY: &str = "rdbs.workspace";
 const DEMO_WORKSPACE_KEY: &str = "rdbs.workspace.demo";
+/// Persisted theme choice (`true` = light).
+const LIGHT_THEME_KEY: &str = "rdbs.light_theme";
 
 const SC_NEW_CONNECTION: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::N);
 const SC_NEW_QUERY: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::T);
@@ -143,6 +145,8 @@ fn history_entry(
 
 /// The Zephix application.
 pub struct StudioApp {
+    /// Keeps the window on its monitor.
+    window_fit: crate::window::WindowFit,
     services: ServiceHandle,
     store: ProfileStore,
     profiles: Vec<ConnectionProfile>,
@@ -165,17 +169,53 @@ pub struct StudioApp {
     /// Cached history rows for the history tab, and the filter they match.
     history: Vec<rdbs_storage::HistoryEntry>,
     history_filter: String,
-    /// DDL requests in flight: request → (profile, database override, title).
-    ddl_requests: HashMap<rdbs_core::RequestId, (ProfileId, Option<String>, String)>,
+    /// DDL requests in flight.
+    ddl_requests: HashMap<rdbs_core::RequestId, DdlRequest>,
+    /// Routine parameter requests in flight, for the Execute dialog.
+    routine_requests: HashMap<rdbs_core::RequestId, RoutineTarget>,
+    /// Execute dialog of a function or procedure.
+    exec: Option<ExecDialog>,
     /// Backup schedules and running backups.
     backups: crate::model::BackupState,
+}
+
+/// A DDL request in flight.
+struct DdlRequest {
+    profile_id: ProfileId,
+    database: Option<String>,
+    title: String,
+    /// Set when the definition is opened for editing.
+    edit: Option<RoutineTarget>,
+}
+
+/// A function or procedure being edited or executed.
+#[derive(Clone)]
+struct RoutineTarget {
+    profile_id: ProfileId,
+    database: Option<String>,
+    kind: rdbs_core::DatabaseKind,
+    qualified: String,
+    name: String,
+    routine: rdbs_core::ObjectKind,
+}
+
+/// Parameter values of a routine about to be executed.
+struct ExecDialog {
+    target: RoutineTarget,
+    signature: rdbs_core::routine::RoutineSignature,
+    values: Vec<String>,
+    nulls: Vec<bool>,
 }
 
 impl StudioApp {
     /// Creates the app: applies the theme, starts the worker, opens local storage and restores
     /// the persisted workspace.
     pub fn new(cc: &eframe::CreationContext<'_>, config: AppConfig) -> Result<Self, InitError> {
-        theme::apply(&cc.egui_ctx);
+        let light = cc
+            .storage
+            .and_then(|s| eframe::get_value::<bool>(s, LIGHT_THEME_KEY))
+            .unwrap_or(false);
+        theme::apply(&cc.egui_ctx, light);
 
         let repaint_ctx = cc.egui_ctx.clone();
         let services =
@@ -215,12 +255,15 @@ impl StudioApp {
         } else {
             WORKSPACE_KEY
         };
-        let workspace: Workspace = cc
+        let mut workspace: Workspace = cc
             .storage
             .and_then(|s| eframe::get_value(s, key))
             .unwrap_or_default();
+        // Every start opens on the home page; the other restored tabs stay behind it.
+        workspace.show_welcome();
 
         Ok(Self {
+            window_fit: crate::window::WindowFit::default(),
             services,
             store,
             profiles,
@@ -241,6 +284,8 @@ impl StudioApp {
             history: Vec::new(),
             history_filter: String::new(),
             ddl_requests: HashMap::new(),
+            routine_requests: HashMap::new(),
+            exec: None,
             backups: crate::model::BackupState {
                 schedules,
                 ..crate::model::BackupState::default()
@@ -432,19 +477,65 @@ impl StudioApp {
                 }
             }
             Event::DdlLoaded { request_id, result } => {
-                if let Some((profile_id, database, title)) = self.ddl_requests.remove(&request_id) {
+                if let Some(request) = self.ddl_requests.remove(&request_id) {
                     match result {
                         Ok(ddl) => {
-                            let id =
-                                self.workspace
-                                    .open_query_tab(Some(profile_id), ddl, Some(title));
+                            let text = match &request.edit {
+                                Some(t) => rdbs_core::routine::edit_script(
+                                    t.kind,
+                                    &t.qualified,
+                                    t.routine,
+                                    &ddl,
+                                ),
+                                None => ddl,
+                            };
+                            let id = self.workspace.open_query_tab(
+                                Some(request.profile_id),
+                                text,
+                                Some(request.title),
+                            );
                             if let Some(q) = self.workspace.query_tab_mut(id) {
-                                q.database = database;
+                                q.database = request.database;
+                            }
+                            self.status = None;
+                        }
+                        Err(e) => {
+                            self.status = Some(StatusMessage::error(format!(
+                                "Could not load the definition: {e}"
+                            )));
+                        }
+                    }
+                }
+            }
+            Event::RoutineLoaded { request_id, result } => {
+                if let Some(target) = self.routine_requests.remove(&request_id) {
+                    match result {
+                        Ok(signature) => {
+                            self.status = None;
+                            if signature.params.iter().any(|p| p.mode.takes_value()) {
+                                let n = signature.params.len();
+                                self.exec = Some(ExecDialog {
+                                    target,
+                                    signature,
+                                    values: vec![String::new(); n],
+                                    nulls: vec![false; n],
+                                });
+                            } else {
+                                let sql = rdbs_core::routine::call_statement(
+                                    target.kind,
+                                    &target.qualified,
+                                    target.routine,
+                                    &signature,
+                                    &[],
+                                );
+                                self.run_routine(&target, sql);
                             }
                         }
                         Err(e) => {
-                            self.status =
-                                Some(StatusMessage::error(format!("Could not load DDL: {e}")));
+                            self.status = Some(StatusMessage::error(format!(
+                                "Could not load the parameters of {}: {e}",
+                                target.name
+                            )));
                         }
                     }
                 }
@@ -505,6 +596,7 @@ impl StudioApp {
                         profile_name,
                     };
                     q.run.grid = GridState::default();
+                    q.run.stacked_grids.clear();
                     q.run.show_messages = !has_results;
                     q.run.active_result = 0;
                     if let Some(running) = &running {
@@ -666,6 +758,7 @@ impl StudioApp {
             || self.confirm.is_some()
             || self.show_about
             || self.prompt.is_some()
+            || self.exec.is_some()
         {
             return; // Modals own the keyboard.
         }
@@ -795,6 +888,10 @@ impl StudioApp {
                     let Some(kind) = self.profile(obj.profile_id).map(|p| p.kind) else {
                         continue;
                     };
+                    if kind.is_sql() {
+                        self.open_data_tab(&obj, kind);
+                        continue;
+                    }
                     let qualified = dialect::qualified_name(
                         kind,
                         obj.database.as_deref(),
@@ -824,7 +921,13 @@ impl StudioApp {
                     let follow_up = self.run_tab(id);
                     self.apply(follow_up);
                 }
-                UiAction::ShowDdl(obj) => self.request_ddl(obj),
+                UiAction::ShowDdl(obj) => self.request_ddl(obj, false),
+                UiAction::EditRoutine(obj) => self.request_ddl(obj, true),
+                UiAction::MoveConnection { id, target, below } => {
+                    self.move_connection(id, target, below);
+                }
+                UiAction::ExecuteRoutine(obj) => self.request_routine(obj),
+                UiAction::SelectTop { obj, rows } => self.open_select(&obj, Some(rows)),
                 UiAction::OpenTool(launch) => self.workspace.open_tool(launch),
                 UiAction::SaveSchedule(schedule) => match self.store.save_schedule(&schedule) {
                     Ok(()) => {
@@ -1045,21 +1148,174 @@ impl StudioApp {
         })
     }
 
-    fn request_ddl(&mut self, obj: crate::model::ObjectRef) {
+    /// Opens the rows of a table or view in a data tab (or focuses the one already open).
+    fn open_data_tab(&mut self, obj: &crate::model::ObjectRef, kind: rdbs_core::DatabaseKind) {
+        let qualified = dialect::qualified_name(
+            kind,
+            obj.database.as_deref(),
+            obj.schema.as_deref(),
+            &obj.name,
+        );
+        let existing = self.workspace.dock.find_tab_from(|t| {
+            matches!(t, crate::workspace::Tab::Query(q)
+                if q.profile_id == Some(obj.profile_id)
+                    && q.data_view.as_ref().is_some_and(|v| v.qualified == qualified))
+        });
+        if let Some(path) = existing {
+            let _ = self.workspace.dock.set_active_tab(path);
+            return;
+        }
+        let database = self.database_override(obj, kind);
+        let table = self.table_target(obj, kind);
+        let view = crate::workspace::DataView {
+            kind,
+            qualified,
+            filter: String::new(),
+            order: String::new(),
+            limit: Some(1000),
+        };
+        let id =
+            self.workspace
+                .open_query_tab(Some(obj.profile_id), view.sql(), Some(obj.name.clone()));
+        if let Some(q) = self.workspace.query_tab_mut(id) {
+            q.database = database;
+            q.table = table;
+            q.data_view = Some(view);
+        }
+        let follow_up = self.run_tab(id);
+        self.apply(follow_up);
+    }
+
+    /// Opens a query tab selecting the first `rows` rows of a table or view and runs it.
+    fn open_select(&mut self, obj: &crate::model::ObjectRef, rows: Option<u32>) {
+        let Some(kind) = self.profile(obj.profile_id).map(|p| p.kind) else {
+            return;
+        };
+        let qualified = dialect::qualified_name(
+            kind,
+            obj.database.as_deref(),
+            obj.schema.as_deref(),
+            &obj.name,
+        );
+        let sql = dialect::select_preview(kind, &qualified, rows.unwrap_or(1000));
+        let database = self.database_override(obj, kind);
+        let table = self.table_target(obj, kind);
+        let id = self
+            .workspace
+            .open_query_tab(Some(obj.profile_id), sql, Some(obj.name.clone()));
+        if let Some(q) = self.workspace.query_tab_mut(id) {
+            q.database = database;
+            q.table = table;
+        }
+        let follow_up = self.run_tab(id);
+        self.apply(follow_up);
+    }
+
+    /// Moves a connection above or below another one and stores the new order.
+    fn move_connection(&mut self, id: ProfileId, target: ProfileId, below: bool) {
+        let Some(from) = self.profiles.iter().position(|p| p.id == id) else {
+            return;
+        };
+        let moved = self.profiles.remove(from);
+        let Some(to) = self.profiles.iter().position(|p| p.id == target) else {
+            self.profiles.insert(from, moved);
+            return;
+        };
+        self.profiles.insert(if below { to + 1 } else { to }, moved);
+        let ids: Vec<ProfileId> = self.profiles.iter().map(|p| p.id).collect();
+        if let Err(e) = self.store.reorder(&ids) {
+            self.status = Some(StatusMessage::error(format!(
+                "Could not save the connection order: {e}"
+            )));
+        }
+    }
+
+    /// Everything needed to edit or execute a routine.
+    fn routine_target(
+        &self,
+        obj: &crate::model::ObjectRef,
+        kind: rdbs_core::DatabaseKind,
+    ) -> RoutineTarget {
+        RoutineTarget {
+            profile_id: obj.profile_id,
+            database: self.database_override(obj, kind),
+            kind,
+            qualified: dialect::qualified_name(
+                kind,
+                obj.database.as_deref(),
+                obj.schema.as_deref(),
+                &obj.name,
+            ),
+            name: obj.name.clone(),
+            routine: obj.kind,
+        }
+    }
+
+    /// Fetches the parameters of a routine for the Execute dialog.
+    fn request_routine(&mut self, obj: crate::model::ObjectRef) {
+        let Some(profile) = self.profile(obj.profile_id).cloned() else {
+            return;
+        };
+        let target = self.routine_target(&obj, profile.kind);
+        let request_id = self.services.next_request_id();
+        self.services.send(Command::GetRoutine {
+            request_id,
+            profile,
+            database: target.database.clone(),
+            object: rdbs_core::schema::ObjectPath {
+                database: obj.database,
+                schema: obj.schema,
+                name: obj.name.clone(),
+                kind: obj.kind,
+            },
+            password: self.session_passwords.get(&obj.profile_id).cloned(),
+        });
+        self.status = Some(StatusMessage::info(format!(
+            "Loading the parameters of {}…",
+            obj.name
+        )));
+        self.routine_requests.insert(request_id, target);
+    }
+
+    /// Opens a query tab with `sql` for a routine and runs it.
+    fn run_routine(&mut self, target: &RoutineTarget, sql: String) {
+        let id = self.workspace.open_query_tab(
+            Some(target.profile_id),
+            sql,
+            Some(format!("Exec {}", target.name)),
+        );
+        if let Some(q) = self.workspace.query_tab_mut(id) {
+            q.database = target.database.clone();
+        }
+        let follow_up = self.run_tab(id);
+        self.apply(follow_up);
+    }
+
+    fn request_ddl(&mut self, obj: crate::model::ObjectRef, edit: bool) {
         let Some(profile) = self.profile(obj.profile_id).cloned() else {
             return;
         };
         let database = self.database_override(&obj, profile.kind);
         let request_id = self.services.next_request_id();
+        let edit = edit.then(|| self.routine_target(&obj, profile.kind));
+        let title = if edit.is_some() {
+            format!("Edit {}", obj.name)
+        } else {
+            format!("DDL · {}", obj.name)
+        };
         self.ddl_requests.insert(
             request_id,
-            (
-                obj.profile_id,
-                database.clone(),
-                format!("DDL · {}", obj.name),
-            ),
+            DdlRequest {
+                profile_id: obj.profile_id,
+                database: database.clone(),
+                title,
+                edit,
+            },
         );
-        self.status = Some(StatusMessage::info(format!("Loading DDL of {}…", obj.name)));
+        self.status = Some(StatusMessage::info(format!(
+            "Loading the definition of {}…",
+            obj.name
+        )));
         self.services.send(Command::GetDdl {
             request_id,
             profile,
@@ -1365,6 +1621,11 @@ impl StudioApp {
                     self.workspace.show_welcome();
                 }
                 ui.separator();
+                let mut light = theme::is_light();
+                if ui.checkbox(&mut light, "Light Theme").clicked() {
+                    theme::set_light(ui.ctx(), light);
+                }
+                ui.separator();
                 if ui
                     .button(format!("{}  Reset Layout", icon::ARROWS_CLOCKWISE))
                     .clicked()
@@ -1399,6 +1660,21 @@ impl StudioApp {
                     .clicked()
                 {
                     self.show_about = true;
+                }
+            });
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let light = theme::is_light();
+                let (glyph, tip) = if light {
+                    (icon::MOON, "Switch to the dark theme")
+                } else {
+                    (icon::SUN, "Switch to the light theme")
+                };
+                if ui
+                    .add(Button::new(glyph).frame(false))
+                    .on_hover_text(tip)
+                    .clicked()
+                {
+                    theme::set_light(ui.ctx(), !light);
                 }
             });
         });
@@ -1610,19 +1886,7 @@ impl StudioApp {
 
     fn status_bar(&self, ui: &mut Ui) {
         ui.horizontal_centered(|ui| {
-            if let Some(msg) = &self.status {
-                let (glyph, c) = match msg.severity {
-                    Severity::Info => (icon::INFO, color::TEXT_DIM),
-                    Severity::Error => (icon::WARNING, color::DANGER),
-                };
-                ui.label(
-                    RichText::new(format!("{glyph}  {}", msg.text))
-                        .size(12.0)
-                        .color(c),
-                );
-            } else {
-                ui.label(RichText::new("Ready").size(12.0).color(color::TEXT_DIM));
-            }
+            // The summary on the right gets its room first; the message takes what is left.
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let connected = self
                     .connections
@@ -1641,8 +1905,33 @@ impl StudioApp {
                         self.profiles.len()
                     ))
                     .size(12.0)
-                    .color(color::TEXT_FAINT),
+                    .color(color::text_faint()),
                 );
+                ui.add_space(16.0);
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    let Some(msg) = &self.status else {
+                        ui.label(RichText::new("Ready").size(12.0).color(color::text_dim()));
+                        return;
+                    };
+                    let (glyph, c) = match msg.severity {
+                        Severity::Info => (icon::INFO, color::text_dim()),
+                        Severity::Error => (icon::WARNING, color::danger()),
+                    };
+                    // Server versions and errors can span several lines: one line here, all of
+                    // it on hover.
+                    let one_line = msg.text.split_whitespace().collect::<Vec<_>>().join(" ");
+                    let label = ui.add(
+                        egui::Label::new(
+                            RichText::new(format!("{glyph}  {one_line}"))
+                                .size(12.0)
+                                .color(c),
+                        )
+                        .truncate(),
+                    );
+                    if one_line != msg.text || label.rect.width() >= ui.available_width() {
+                        label.on_hover_text(msg.text.as_str());
+                    }
+                });
             });
         });
     }
@@ -1697,12 +1986,12 @@ impl StudioApp {
             });
             ui.label(
                 RichText::new(format!("{}@{}", profile.username, profile.endpoint()))
-                    .color(color::TEXT_DIM),
+                    .color(color::text_dim()),
             );
             if let Some(reason) = &prompt.reason {
                 ui.add_space(4.0);
                 ui.label(
-                    RichText::new(format!("{}  {reason}", icon::WARNING)).color(color::DANGER),
+                    RichText::new(format!("{}  {reason}", icon::WARNING)).color(color::danger()),
                 );
             }
             ui.add_space(8.0);
@@ -1722,7 +2011,7 @@ impl StudioApp {
             ui.add_space(8.0);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let connect = Button::new(RichText::new("Connect").color(Color32::WHITE).strong())
-                    .fill(color::ACCENT)
+                    .fill(color::accent())
                     .min_size(Vec2::new(96.0, 26.0));
                 if ui.add(connect).clicked() {
                     submit = true;
@@ -1759,6 +2048,122 @@ impl StudioApp {
                 self.apply(follow_up);
             }
         }
+    }
+
+    fn show_exec_dialog(&mut self, ctx: &egui::Context) {
+        let Some(exec) = &mut self.exec else {
+            return;
+        };
+        let mut run = false;
+        let mut cancel = false;
+        let what = if exec.target.routine == rdbs_core::ObjectKind::Function {
+            "function"
+        } else {
+            "procedure"
+        };
+        let response = egui::Modal::new(Id::new("exec-routine")).show(ctx, |ui| {
+            ui.set_width(560.0);
+            ui.label(
+                RichText::new(format!(
+                    "{}  Execute {what} {}",
+                    icon::PLAY,
+                    exec.target.name
+                ))
+                .size(16.0)
+                .strong(),
+            );
+            ui.label(
+                RichText::new("Text is quoted for you; numbers are passed as they are.")
+                    .color(color::text_dim()),
+            );
+            ui.add_space(8.0);
+            egui::Grid::new("exec-params")
+                .num_columns(4)
+                .spacing([10.0, 6.0])
+                .striped(true)
+                .show(ui, |ui| {
+                    for h in ["Parameter", "Type", "Value", "NULL"] {
+                        ui.label(RichText::new(h).color(color::text_dim()));
+                    }
+                    ui.end_row();
+                    for (i, p) in exec.signature.params.iter().enumerate() {
+                        let name = if p.name.is_empty() {
+                            format!("${}", i + 1)
+                        } else {
+                            p.name.clone()
+                        };
+                        ui.label(RichText::new(name).strong());
+                        ui.label(
+                            RichText::new(format!("{} · {}", p.data_type, p.mode.label()))
+                                .color(color::text_dim()),
+                        );
+                        if p.mode.takes_value() {
+                            let null = exec.nulls[i];
+                            ui.add_enabled_ui(!null, |ui| {
+                                ui.add_sized(
+                                    [240.0, ui.spacing().interact_size.y],
+                                    egui::TextEdit::singleline(&mut exec.values[i])
+                                        .hint_text(if null { "NULL" } else { "" }),
+                                )
+                            });
+                            ui.checkbox(&mut exec.nulls[i], "");
+                        } else {
+                            ui.label(RichText::new("returned").color(color::text_faint()));
+                            ui.label("");
+                        }
+                        ui.end_row();
+                    }
+                });
+            ui.add_space(10.0);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let execute = Button::new(
+                    RichText::new(format!("{}  Execute", icon::PLAY))
+                        .color(Color32::WHITE)
+                        .strong(),
+                )
+                .fill(color::accent())
+                .min_size(Vec2::new(110.0, 26.0));
+                if ui.add(execute).clicked() {
+                    run = true;
+                }
+                if ui
+                    .add(Button::new("Cancel").min_size(Vec2::new(84.0, 26.0)))
+                    .clicked()
+                {
+                    cancel = true;
+                }
+            });
+        });
+        if cancel || (!run && response.should_close()) {
+            self.exec = None;
+            return;
+        }
+        if !run {
+            return;
+        }
+        let Some(exec) = self.exec.take() else {
+            return;
+        };
+        let args: Vec<rdbs_core::routine::ArgValue> = exec
+            .values
+            .into_iter()
+            .zip(exec.nulls)
+            .map(|(value, null)| {
+                if null {
+                    rdbs_core::routine::ArgValue::Null
+                } else {
+                    rdbs_core::routine::ArgValue::Text(value)
+                }
+            })
+            .collect();
+        let sql = rdbs_core::routine::call_statement(
+            exec.target.kind,
+            &exec.target.qualified,
+            exec.target.routine,
+            &exec.signature,
+            &args,
+        );
+        self.run_routine(&exec.target, sql);
     }
 
     fn show_confirmation(&mut self, ctx: &egui::Context) {
@@ -1820,15 +2225,15 @@ impl StudioApp {
                 RichText::new(title)
                     .size(16.0)
                     .strong()
-                    .color(color::WARNING),
+                    .color(color::warning()),
             );
             ui.add_space(6.0);
             ui.label(body);
             if let Some(sql) = preview {
                 ui.add_space(6.0);
                 Frame::new()
-                    .fill(color::EDITOR)
-                    .stroke(Stroke::new(1.0, color::BORDER))
+                    .fill(color::editor())
+                    .stroke(Stroke::new(1.0, color::border()))
                     .corner_radius(4)
                     .inner_margin(Margin::same(8))
                     .show(ui, |ui| {
@@ -1844,7 +2249,7 @@ impl StudioApp {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let danger =
                     Button::new(RichText::new(confirm_label).color(Color32::WHITE).strong())
-                        .fill(color::DANGER)
+                        .fill(color::danger())
                         .min_size(Vec2::new(120.0, 26.0));
                 if ui.add(danger).clicked() {
                     decision = Some(true);
@@ -1906,23 +2311,23 @@ impl StudioApp {
                 ui.label(
                     RichText::new(icon::DATABASE)
                         .size(36.0)
-                        .color(color::ACCENT),
+                        .color(color::accent()),
                 );
                 ui.label(
                     RichText::new(rdbs_core::brand::APP_NAME)
                         .size(22.0)
                         .strong(),
                 );
-                ui.label(RichText::new(rdbs_core::brand::APP_TAGLINE).color(color::TEXT));
+                ui.label(RichText::new(rdbs_core::brand::APP_TAGLINE).color(color::text()));
                 ui.label(
                     RichText::new(format!("Version {}", env!("CARGO_PKG_VERSION")))
-                        .color(color::TEXT_DIM),
+                        .color(color::text_dim()),
                 );
                 ui.add_space(8.0);
                 ui.label(
                     RichText::new("Author & creator")
                         .small()
-                        .color(color::TEXT_FAINT),
+                        .color(color::text_faint()),
                 );
                 ui.label(RichText::new(rdbs_core::brand::APP_AUTHOR).strong());
                 ui.add_space(6.0);
@@ -1933,7 +2338,7 @@ impl StudioApp {
                         rdbs_core::brand::APP_AUTHOR
                     ))
                     .small()
-                    .color(color::TEXT_FAINT),
+                    .color(color::text_faint()),
                 );
                 ui.add_space(8.0);
                 ui.button("Close").clicked()
@@ -1948,35 +2353,36 @@ impl StudioApp {
 
 fn dock_style(style: &mut egui_dock::Style) {
     style.main_surface_border_stroke = Stroke::NONE;
-    style.tab_bar.bg_fill = color::PANEL;
+    style.tab_bar.bg_fill = color::panel();
     style.tab_bar.height = 30.0;
-    style.tab_bar.hline_color = color::BORDER;
+    style.tab_bar.hline_color = color::border();
 
-    style.tab.active.bg_fill = color::EDITOR;
-    style.tab.active.text_color = color::TEXT;
-    style.tab.active.outline_color = color::BORDER;
-    style.tab.focused.bg_fill = color::EDITOR;
-    style.tab.focused.text_color = Color32::WHITE;
-    style.tab.focused.outline_color = color::ACCENT;
-    style.tab.inactive.bg_fill = color::PANEL;
-    style.tab.inactive.text_color = color::TEXT_DIM;
+    style.tab.active.bg_fill = color::editor();
+    style.tab.active.text_color = color::text();
+    style.tab.active.outline_color = color::border();
+    style.tab.focused.bg_fill = color::editor();
+    style.tab.focused.text_color = color::text_strong();
+    style.tab.focused.outline_color = color::accent();
+    style.tab.inactive.bg_fill = color::panel();
+    style.tab.inactive.text_color = color::text_dim();
     style.tab.inactive.outline_color = Color32::TRANSPARENT;
-    style.tab.hovered.bg_fill = color::SURFACE;
-    style.tab.hovered.text_color = color::TEXT;
-    style.tab.tab_body.bg_fill = color::EDITOR;
+    style.tab.hovered.bg_fill = color::surface();
+    style.tab.hovered.text_color = color::text();
+    style.tab.tab_body.bg_fill = color::editor();
     style.tab.tab_body.inner_margin = Margin::ZERO;
-    style.tab.tab_body.stroke = Stroke::new(1.0, color::BORDER);
+    style.tab.tab_body.stroke = Stroke::new(1.0, color::border());
     style.tab.hline_below_active_tab_name = true;
 
-    style.separator.color_idle = color::BORDER;
-    style.separator.color_hovered = color::ACCENT;
-    style.separator.color_dragged = color::ACCENT;
-    style.overlay.selection_color = color::ACCENT.gamma_multiply(0.35);
+    style.separator.color_idle = color::border();
+    style.separator.color_hovered = color::accent();
+    style.separator.color_dragged = color::accent();
+    style.overlay.selection_color = color::accent().gamma_multiply(0.35);
 }
 
 impl eframe::App for StudioApp {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        self.window_fit.update(&ctx);
         self.drain_events();
         self.tick_schedules(&ctx);
         while let Ok(message) = self.export_rx.try_recv() {
@@ -1986,7 +2392,7 @@ impl eframe::App for StudioApp {
         let mut actions = Vec::new();
         self.shortcuts(&ctx, &mut actions);
 
-        let bar = |m: Margin| Frame::new().fill(color::PANEL).inner_margin(m);
+        let bar = |m: Margin| Frame::new().fill(color::panel()).inner_margin(m);
         egui::Panel::top(Id::new("menu-bar"))
             .frame(bar(Margin::symmetric(6, 3)))
             .show(ui, |ui| self.menu_bar(ui, &mut actions));
@@ -2005,7 +2411,7 @@ impl eframe::App for StudioApp {
                 .size_range(180.0..=560.0)
                 .frame(
                     Frame::new()
-                        .fill(color::SIDEBAR)
+                        .fill(color::sidebar())
                         .inner_margin(Margin::same(8)),
                 )
                 .show(ui, |ui| {
@@ -2041,6 +2447,7 @@ impl eframe::App for StudioApp {
 
         self.show_dialog(&ctx);
         self.show_password_prompt(&ctx);
+        self.show_exec_dialog(&ctx);
         self.show_confirmation(&ctx);
         self.about_modal(&ctx);
         self.apply(actions);
@@ -2053,5 +2460,6 @@ impl eframe::App for StudioApp {
             WORKSPACE_KEY
         };
         eframe::set_value(storage, key, &self.workspace);
+        eframe::set_value(storage, LIGHT_THEME_KEY, &theme::is_light());
     }
 }

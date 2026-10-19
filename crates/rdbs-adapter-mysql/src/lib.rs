@@ -324,6 +324,13 @@ impl DatabaseAdapter for MySqlAdapter {
         Box::pin(async move { ddl::object_ddl(self.conn()?, object).await })
     }
 
+    fn routine_signature<'a>(
+        &'a mut self,
+        object: &'a rdbs_core::schema::ObjectPath,
+    ) -> BoxFuture<'a, Result<rdbs_core::routine::RoutineSignature, DbError>> {
+        Box::pin(async move { ddl::routine_signature(self.conn()?, object).await })
+    }
+
     fn apply_changes<'a>(
         &'a mut self,
         changes: &'a [Change],

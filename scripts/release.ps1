@@ -20,6 +20,30 @@ param(
     [string]$Out = (Join-Path $PSScriptRoot '..\dist')
 )
 $ErrorActionPreference = 'Stop'
+
+# Windows Installer shows the license as RTF: convert LICENSE.md (headings bold, paragraphs
+# joined, non-ASCII as \u escapes).
+function ConvertTo-LicenseRtf([string]$Markdown) {
+    $sb = New-Object System.Text.StringBuilder
+    [void]$sb.Append('{\rtf1\ansi\deff0{\fonttbl{\f0 Segoe UI;}}\fs17 ')
+    foreach ($para in (($Markdown -replace "`r", '') -split "`n\s*`n")) {
+        $text = $para.Trim()
+        if (-not $text) { continue }
+        $bold = $text -match '^#+\s'
+        $text = ($text -replace '^#+\s*', '') -replace '\s*\n\s*', ' '
+        # Markdown links, emphasis and <url> brackets read as plain text.
+        $text = (($text -replace '\[([^\]]+)\]\([^)]*\)', '$1') -replace '\*', '') -replace '<(https?://[^>]+)>', '$1'
+        $text = $text.Replace('`', '').Replace('\', '\\').Replace('{', '\{').Replace('}', '\}')
+        $escaped = New-Object System.Text.StringBuilder
+        foreach ($ch in $text.ToCharArray()) {
+            if ([int]$ch -gt 127) { [void]$escaped.Append('\u' + [int]$ch + '?') } else { [void]$escaped.Append($ch) }
+        }
+        if ($bold) { [void]$sb.Append('\b ' + $escaped + '\b0\par\par ') } else { [void]$sb.Append($escaped.ToString() + '\par\par ') }
+    }
+    [void]$sb.Append('}')
+    $sb.ToString()
+}
+
 $root = Resolve-Path (Join-Path $PSScriptRoot '..')
 Push-Location $root
 try {
@@ -49,7 +73,11 @@ try {
     $base = "Zephix-$Version-x64"
     $msi = Join-Path $Out "$base.msi"
     dotnet tool restore | Out-Null
-    dotnet tool run wix build installer\Zephix.wxs -arch x64 `
+    dotnet tool run wix extension add -g WixToolset.UI.wixext/5.0.2 | Out-Null
+    $rtf = Join-Path $stage 'License.rtf'
+    [System.IO.File]::WriteAllText($rtf, (ConvertTo-LicenseRtf (Get-Content -Raw 'LICENSE.md')))
+    dotnet tool run wix build installer\Zephix.wxs -arch x64 -ext WixToolset.UI.wixext `
+        -d "LicenseRtf=$rtf" `
         -d "Version=$Version" -d "ExePath=$exe" -d "IconPath=apps\zephix\assets\zephix.ico" `
         -o $msi
     if ($LASTEXITCODE -ne 0) { throw 'MSI build failed.' }

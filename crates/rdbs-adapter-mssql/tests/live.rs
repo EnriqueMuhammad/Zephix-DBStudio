@@ -436,3 +436,111 @@ async fn identity_insert_within_one_change() {
         .expect("select");
     assert_eq!(out.results[0].rows[0][0], CellValue::Int(20));
 }
+
+#[tokio::test]
+async fn routines_can_be_edited_and_executed() {
+    use rdbs_core::routine::{ArgValue, ParamMode, call_statement, edit_script};
+    use rdbs_core::schema::ObjectPath;
+    let Some(mut s) = session().await else { return };
+    for statement in [
+        "IF OBJECT_ID('dbo.it_tax') IS NOT NULL DROP FUNCTION dbo.it_tax",
+        "IF OBJECT_ID('dbo.it_rows') IS NOT NULL DROP FUNCTION dbo.it_rows",
+        "IF OBJECT_ID('dbo.it_total') IS NOT NULL DROP PROCEDURE dbo.it_total",
+        "CREATE FUNCTION dbo.it_tax(@amount decimal(12,2), @rate decimal(5,2)) \
+         RETURNS decimal(12,2) AS BEGIN RETURN @amount * @rate / 100 END",
+        "CREATE FUNCTION dbo.it_rows(@n int) RETURNS TABLE AS RETURN \
+         (SELECT TOP (@n) name FROM sys.objects ORDER BY name)",
+        "CREATE PROCEDURE dbo.it_total @label nvarchar(20), @total int OUTPUT \
+         AS BEGIN SET NOCOUNT ON; SET @total = LEN(@label) END",
+    ] {
+        s.execute(statement, CancelHandle::new())
+            .await
+            .expect(statement);
+    }
+    let path = |name: &str, kind| ObjectPath {
+        database: None,
+        schema: Some("dbo".into()),
+        name: name.into(),
+        kind,
+    };
+
+    let f = s
+        .routine_signature(&path("it_tax", ObjectKind::Function))
+        .await
+        .expect("scalar signature");
+    assert_eq!(f.params.len(), 2, "{f:?}");
+    assert_eq!(f.params[0].name, "@amount");
+    assert_eq!(f.params[0].data_type, "decimal(12,2)");
+    assert!(!f.returns_table);
+    let sql = call_statement(
+        DatabaseKind::SqlServer,
+        "[dbo].[it_tax]",
+        ObjectKind::Function,
+        &f,
+        &[ArgValue::Text("200".into()), ArgValue::Text("5".into())],
+    );
+    let out = s
+        .execute(&sql, CancelHandle::new())
+        .await
+        .expect("call scalar");
+    assert_eq!(
+        out.last_result().expect("rows").rows[0][0],
+        CellValue::Decimal("10.00".into())
+    );
+
+    let t = s
+        .routine_signature(&path("it_rows", ObjectKind::Function))
+        .await
+        .expect("table signature");
+    assert!(t.returns_table);
+    let sql = call_statement(
+        DatabaseKind::SqlServer,
+        "[dbo].[it_rows]",
+        ObjectKind::Function,
+        &t,
+        &[ArgValue::Text("3".into())],
+    );
+    let out = s
+        .execute(&sql, CancelHandle::new())
+        .await
+        .expect("call table function");
+    assert_eq!(out.last_result().expect("rows").rows.len(), 3);
+
+    let p = s
+        .routine_signature(&path("it_total", ObjectKind::Procedure))
+        .await
+        .expect("procedure signature");
+    assert_eq!(p.params[1].mode, ParamMode::Out);
+    assert_eq!(p.params[0].data_type, "nvarchar(20)");
+    let sql = call_statement(
+        DatabaseKind::SqlServer,
+        "[dbo].[it_total]",
+        ObjectKind::Procedure,
+        &p,
+        &[ArgValue::Text("hello".into()), ArgValue::Null],
+    );
+    let out = s
+        .execute(&sql, CancelHandle::new())
+        .await
+        .expect("call procedure");
+    assert_eq!(
+        out.last_result().expect("rows").rows[0][0],
+        CellValue::Int(5)
+    );
+
+    // CREATE OR ALTER: the edit script saves the procedure when run unchanged.
+    let ddl = s
+        .object_ddl(&path("it_total", ObjectKind::Procedure))
+        .await
+        .expect("ddl");
+    let script = edit_script(
+        DatabaseKind::SqlServer,
+        "[dbo].[it_total]",
+        ObjectKind::Procedure,
+        &ddl,
+    );
+    assert!(script.contains("CREATE OR ALTER"), "{script}");
+    s.execute(&script, CancelHandle::new())
+        .await
+        .expect("edit script runs");
+}

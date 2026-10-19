@@ -310,6 +310,13 @@ impl DatabaseAdapter for MssqlAdapter {
         Box::pin(async move { ddl::object_ddl(self.client().await?, object).await })
     }
 
+    fn routine_signature<'a>(
+        &'a mut self,
+        object: &'a rdbs_core::schema::ObjectPath,
+    ) -> BoxFuture<'a, Result<rdbs_core::routine::RoutineSignature, DbError>> {
+        Box::pin(async move { ddl::routine_signature(self.client().await?, object).await })
+    }
+
     fn apply_changes<'a>(
         &'a mut self,
         changes: &'a [Change],

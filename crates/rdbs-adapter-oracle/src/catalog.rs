@@ -362,6 +362,41 @@ pub fn object_ddl(conn: &oracle::Connection, object: &ObjectPath) -> Result<Stri
     Ok(format!("{};", ddl.trim()))
 }
 
+/// Parameters of a standalone function or procedure.
+pub fn routine_signature(
+    conn: &oracle::Connection,
+    object: &ObjectPath,
+) -> Result<rdbs_core::routine::RoutineSignature, DbError> {
+    use rdbs_core::routine::{ParamMode, RoutineParam, RoutineSignature};
+    let owner = match &object.schema {
+        Some(s) => s.clone(),
+        None => current_schema(conn)?,
+    };
+    // Position 0 is a function's return value; a routine without parameters has one row
+    // without a name.
+    let rows = text_rows(
+        conn,
+        "SELECT argument_name, data_type, in_out FROM all_arguments          WHERE owner = :1 AND object_name = :2 AND package_name IS NULL            AND data_level = 0 AND position > 0 AND argument_name IS NOT NULL          ORDER BY position",
+        &[&owner, &object.name],
+    )?;
+    let params = rows
+        .iter()
+        .map(|r| RoutineParam {
+            name: col(r, 0),
+            data_type: col(r, 1),
+            mode: match col(r, 2).as_str() {
+                "OUT" => ParamMode::Out,
+                "IN/OUT" => ParamMode::InOut,
+                _ => ParamMode::In,
+            },
+        })
+        .collect();
+    Ok(RoutineSignature {
+        params,
+        returns_table: false,
+    })
+}
+
 /// `EXPLAIN PLAN` + `PLAN_TABLE` as a tree.
 pub fn explain(conn: &oracle::Connection, statement: &str) -> Result<ExplainPlan, DbError> {
     let id = format!("RDBS{}", std::process::id());

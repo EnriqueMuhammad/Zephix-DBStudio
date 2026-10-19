@@ -74,8 +74,19 @@ pub enum UiAction {
         /// Execute immediately after opening.
         run: bool,
     },
-    /// Open a table/view preview tab.
+    /// Open the rows of a table or view in a data tab (grid without an editor).
     OpenObject(ObjectRef),
+    /// Open a query tab that selects the first `rows` rows of a table or view, and run it.
+    SelectTop {
+        /// Table or view.
+        obj: ObjectRef,
+        /// Row count.
+        rows: u32,
+    },
+    /// Open the definition of a function or procedure as a script that saves changes.
+    EditRoutine(ObjectRef),
+    /// Ask for the parameters of a function or procedure, then execute it.
+    ExecuteRoutine(ObjectRef),
     /// Fetch an object's DDL and open it in a new tab.
     ShowDdl(ObjectRef),
     /// Connect a profile.
@@ -90,6 +101,15 @@ pub enum UiAction {
     EditConnection(ProfileId),
     /// Copy a profile.
     DuplicateConnection(ProfileId),
+    /// Move a connection in the explorer next to another one.
+    MoveConnection {
+        /// Connection being moved.
+        id: ProfileId,
+        /// Connection it was dropped on.
+        target: ProfileId,
+        /// Place it below `target` (else above).
+        below: bool,
+    },
     /// Ask for confirmation, then delete a profile.
     DeleteConnection(ProfileId),
     /// Ask for confirmation before running a risky statement on production.

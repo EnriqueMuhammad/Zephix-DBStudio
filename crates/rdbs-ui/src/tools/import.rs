@@ -413,14 +413,14 @@ impl Import {
                     .spacing([14.0, 2.0])
                     .show(ui, |ui| {
                         for h in &sheet.headers {
-                            ui.label(RichText::new(h).strong().color(color::ACCENT));
+                            ui.label(RichText::new(h).strong().color(color::accent()));
                         }
                         ui.end_row();
                         for row in sheet.rows.iter().take(15) {
                             for cell in row {
                                 let shown: String = cell.chars().take(40).collect();
                                 ui.label(if cell.is_empty() {
-                                    RichText::new("∅").color(color::TEXT_FAINT)
+                                    RichText::new("∅").color(color::text_faint())
                                 } else {
                                     RichText::new(shown)
                                 });
@@ -470,7 +470,7 @@ impl Import {
                 .spacing([12.0, 3.0])
                 .show(ui, |ui| {
                     for h in ["Import", "Source column", "Column name", "Type"] {
-                        ui.label(RichText::new(h).strong().color(color::TEXT_DIM));
+                        ui.label(RichText::new(h).strong().color(color::text_dim()));
                     }
                     ui.end_row();
                     let types = rdbs_core::ddlgen::common_types(kind);
@@ -512,12 +512,12 @@ impl Import {
                 .spacing([12.0, 3.0])
                 .show(ui, |ui| {
                     for h in ["Target column", "Type", "", "Source column"] {
-                        ui.label(RichText::new(h).strong().color(color::TEXT_DIM));
+                        ui.label(RichText::new(h).strong().color(color::text_dim()));
                     }
                     ui.end_row();
                     for (i, c) in target.columns.iter().enumerate() {
                         ui.label(&c.name);
-                        ui.label(RichText::new(&c.data_type).color(color::TEXT_DIM));
+                        ui.label(RichText::new(&c.data_type).color(color::text_dim()));
                         ui.label(icon::ARROW_LEFT);
                         let current = self.rt.mapping.get(i).copied().flatten();
                         egui::ComboBox::from_id_salt(("import-map", i))
@@ -608,9 +608,9 @@ impl Import {
         ui.checkbox(&mut self.rt.empty_is_null, "Empty cells become NULL");
         if !self.rt.new_table {
             let tint = if self.rt.replace {
-                color::WARNING
+                color::warning()
             } else {
-                color::TEXT
+                color::text()
             };
             ui.checkbox(
                 &mut self.rt.replace,
@@ -622,7 +622,7 @@ impl Import {
         let busy = matches!(self.rt.phase, Phase::Building(_) | Phase::Running(..));
         ui.horizontal(|ui| {
             let button = Button::new(
-                RichText::new(format!("{}  Import", icon::DOWNLOAD_SIMPLE)).color(color::SUCCESS),
+                RichText::new(format!("{}  Import", icon::DOWNLOAD_SIMPLE)).color(color::success()),
             );
             let response = ui
                 .add_enabled(plan.is_ok() && !busy, button)
@@ -635,7 +635,7 @@ impl Import {
                 }
             }
             if let Err(e) = &plan {
-                ui.label(RichText::new(e).color(color::TEXT_DIM));
+                ui.label(RichText::new(e).color(color::text_dim()));
             }
             if busy {
                 ui.spinner();
@@ -656,10 +656,10 @@ impl Import {
                             ""
                         }
                     ))
-                    .color(color::WARNING),
+                    .color(color::warning()),
                 );
                 if ui
-                    .button(RichText::new("Import").color(color::DANGER))
+                    .button(RichText::new("Import").color(color::danger()))
                     .clicked()
                 {
                     self.rt.confirm = false;
@@ -673,7 +673,7 @@ impl Import {
         match &self.rt.phase {
             Phase::Done(msg) => {
                 ui.label(
-                    RichText::new(format!("{}  {msg}", icon::CHECK_CIRCLE)).color(color::SUCCESS),
+                    RichText::new(format!("{}  {msg}", icon::CHECK_CIRCLE)).color(color::success()),
                 );
             }
             Phase::Failed(e) => error_box(ui, e),

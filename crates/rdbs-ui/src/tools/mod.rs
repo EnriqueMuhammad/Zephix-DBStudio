@@ -278,24 +278,24 @@ impl ToolTab {
 /// Header line shared by tools: icon, title and scope.
 pub fn header(ui: &mut Ui, glyph: &str, title: &str, scope: &str) {
     ui.horizontal(|ui| {
-        ui.label(RichText::new(glyph).size(18.0).color(color::ACCENT));
+        ui.label(RichText::new(glyph).size(18.0).color(color::accent()));
         ui.label(RichText::new(title).strong().size(15.0));
-        ui.label(RichText::new(scope).color(color::TEXT_DIM));
+        ui.label(RichText::new(scope).color(color::text_dim()));
     });
 }
 
 /// Error box shared by tools.
 pub fn error_box(ui: &mut Ui, text: &str) {
     egui::Frame::new()
-        .fill(color::DANGER.gamma_multiply(0.08))
-        .stroke(egui::Stroke::new(1.0, color::DANGER.gamma_multiply(0.4)))
+        .fill(color::danger().gamma_multiply(0.08))
+        .stroke(egui::Stroke::new(1.0, color::danger().gamma_multiply(0.4)))
         .corner_radius(6)
         .inner_margin(egui::Margin::same(8))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.add(
                 egui::Label::new(
-                    RichText::new(format!("{}  {text}", icon::WARNING)).color(color::DANGER),
+                    RichText::new(format!("{}  {text}", icon::WARNING)).color(color::danger()),
                 )
                 .selectable(true),
             );

@@ -154,7 +154,7 @@ impl AutocompleteState {
                     ui.label(
                         RichText::new("↑↓ select · Enter/Tab insert · Esc close")
                             .size(10.5)
-                            .color(color::TEXT_FAINT),
+                            .color(color::text_faint()),
                     );
                 });
             });
@@ -182,14 +182,19 @@ impl AutocompleteState {
 
 fn row(ui: &mut Ui, item: &Item, selected: bool) -> egui::Response {
     let (glyph, c) = match item.kind {
-        ItemKind::Column => (icon::COLUMNS, color::TEXT_DIM),
-        ItemKind::Table => (icon::TABLE, egui::Color32::from_rgb(0x5E, 0xA2, 0xFF)),
-        ItemKind::View => (icon::EYE, egui::Color32::from_rgb(0x4F, 0xC1, 0xB0)),
-        ItemKind::Schema => (
-            icon::SQUARES_FOUR,
-            egui::Color32::from_rgb(0xB3, 0x8B, 0xF2),
-        ),
-        ItemKind::Keyword => (icon::TEXT_T, egui::Color32::from_rgb(0x6F, 0xA8, 0xFF)),
+        ItemKind::Column => (icon::COLUMNS, color::text_dim()),
+        kind => {
+            let (glyph, c) = match kind {
+                ItemKind::Table => (icon::TABLE, egui::Color32::from_rgb(0x5E, 0xA2, 0xFF)),
+                ItemKind::View => (icon::EYE, egui::Color32::from_rgb(0x4F, 0xC1, 0xB0)),
+                ItemKind::Schema => (
+                    icon::SQUARES_FOUR,
+                    egui::Color32::from_rgb(0xB3, 0x8B, 0xF2),
+                ),
+                _ => (icon::TEXT_T, egui::Color32::from_rgb(0x6F, 0xA8, 0xFF)),
+            };
+            (glyph, crate::theme::icon_tint(c))
+        }
     };
     let text = match &item.detail {
         Some(d) => format!("{glyph}  {}   {d}", item.label),
@@ -200,7 +205,7 @@ fn row(ui: &mut Ui, item: &Item, selected: bool) -> egui::Response {
         RichText::new(text).color(if selected {
             egui::Color32::WHITE
         } else {
-            c.lerp_to_gamma(color::TEXT, 0.5)
+            c.lerp_to_gamma(color::text(), 0.5)
         }),
     );
     ui.add_sized([ui.available_width(), 20.0], label)

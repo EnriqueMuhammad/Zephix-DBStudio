@@ -275,7 +275,7 @@ impl Er {
                         self.rt.tables.len()
                     ))
                     .small()
-                    .color(color::TEXT_FAINT),
+                    .color(color::text_faint()),
                 );
                 self.canvas(ui, cx);
             });
@@ -285,7 +285,7 @@ impl Er {
         let rect = ui.available_rect_before_wrap();
         let response = ui.allocate_rect(rect, Sense::click_and_drag());
         let painter = ui.painter_at(rect);
-        painter.rect_filled(rect, 0.0, color::EDITOR);
+        painter.rect_filled(rect, 0.0, color::editor());
 
         if self.rt.zoom <= 0.0 {
             self.rt.zoom = 1.0;
@@ -402,9 +402,9 @@ impl Er {
                 let stroke = Stroke::new(
                     if highlight { 2.0 } else { 1.2 },
                     if highlight {
-                        color::ACCENT
+                        color::accent()
                     } else {
-                        color::TEXT_FAINT
+                        color::text_faint()
                     },
                 );
                 let (start, end, out_dir, in_dir) = if key(t) == key(parent) {
@@ -465,13 +465,13 @@ impl Er {
             let selected = focus.as_ref() == Some(&k);
             let matched = !filter.is_empty() && t.name.to_lowercase().contains(&filter);
             let border = if selected {
-                color::ACCENT
+                color::accent()
             } else if matched {
-                color::WARNING
+                color::warning()
             } else {
-                color::BORDER
+                color::border()
             };
-            painter.rect_filled(r, 6.0 * zoom, color::SURFACE);
+            painter.rect_filled(r, 6.0 * zoom, color::surface());
             painter.rect_stroke(
                 r,
                 6.0 * zoom,
@@ -487,14 +487,14 @@ impl Er {
                     sw: 0,
                     se: 0,
                 },
-                color::ACCENT.gamma_multiply(if selected { 0.55 } else { 0.3 }),
+                color::accent().gamma_multiply(if selected { 0.55 } else { 0.3 }),
             );
             painter.text(
                 head.left_center() + vec2(8.0 * zoom, 0.0),
                 Align2::LEFT_CENTER,
                 format!("{}  {}", icon::TABLE, t.name),
                 text(13.0),
-                color::TEXT,
+                color::text(),
             );
             if zoom < 0.45 {
                 continue;
@@ -504,11 +504,11 @@ impl Er {
                 let is_pk = t.primary_key.contains(&c.name);
                 let is_fk = t.foreign_keys.iter().any(|fk| fk.columns.contains(&c.name));
                 let (glyph, glyph_color) = if is_pk {
-                    (icon::KEY, color::WARNING)
+                    (icon::KEY, color::warning())
                 } else if is_fk {
-                    (icon::LINK, color::ACCENT)
+                    (icon::LINK, color::accent())
                 } else {
-                    (icon::DOT_OUTLINE, color::TEXT_FAINT)
+                    (icon::DOT_OUTLINE, color::text_faint())
                 };
                 painter.text(
                     pos2(r.left() + 10.0 * zoom, y),
@@ -522,7 +522,7 @@ impl Er {
                     Align2::LEFT_CENTER,
                     &c.name,
                     text(12.0),
-                    color::TEXT,
+                    color::text(),
                 );
                 let ty: String = c.data_type.chars().take(22).collect();
                 painter.text(
@@ -530,7 +530,7 @@ impl Er {
                     Align2::RIGHT_CENTER,
                     ty,
                     text(11.0),
-                    color::TEXT_FAINT,
+                    color::text_faint(),
                 );
             }
             if t.columns.len() > MAX_ROWS {
@@ -540,7 +540,7 @@ impl Er {
                     Align2::LEFT_CENTER,
                     format!("… {} more", t.columns.len() - MAX_ROWS),
                     text(11.0),
-                    color::TEXT_FAINT,
+                    color::text_faint(),
                 );
             }
         }
@@ -550,7 +550,7 @@ impl Er {
                 Align2::CENTER_CENTER,
                 "No tables in this schema",
                 FontId::proportional(14.0),
-                color::TEXT_DIM,
+                color::text_dim(),
             );
         }
     }

@@ -134,7 +134,7 @@ impl ConnectionDialog {
                 ui.label(
                     RichText::new("Passwords are stored in the OS keychain, never on disk")
                         .small()
-                        .color(color::TEXT_FAINT),
+                        .color(color::text_faint()),
                 );
             });
         });
@@ -147,7 +147,7 @@ impl ConnectionDialog {
                 RichText::new("ENGINE")
                     .size(11.0)
                     .strong()
-                    .color(color::TEXT_DIM),
+                    .color(color::text_dim()),
             );
             ui.add_space(2.0);
             for kind in DatabaseKind::ALL {
@@ -155,9 +155,9 @@ impl ConnectionDialog {
                 let (rect, response) =
                     ui.allocate_exact_size(Vec2::new(ui.available_width(), 30.0), Sense::click());
                 if selected {
-                    ui.painter().rect_filled(rect, 4, color::SELECTION);
+                    ui.painter().rect_filled(rect, 4, color::selection());
                 } else if response.hovered() {
-                    ui.painter().rect_filled(rect, 4, color::SURFACE);
+                    ui.painter().rect_filled(rect, 4, color::surface());
                 }
                 let badge = egui::Rect::from_center_size(
                     egui::pos2(rect.left() + 16.0, rect.center().y),
@@ -169,7 +169,7 @@ impl ConnectionDialog {
                     egui::Align2::LEFT_CENTER,
                     kind.display_name(),
                     egui::FontId::proportional(13.5),
-                    color::TEXT,
+                    color::text(),
                 );
                 if response.clicked() && !selected {
                     self.draft.set_kind(kind);
@@ -361,7 +361,7 @@ impl ConnectionDialog {
                     "{}  Data-modifying and schema statements will ask for confirmation.",
                     icon::SHIELD_WARNING
                 ))
-                .color(color::WARNING),
+                .color(color::warning()),
             );
         }
         if changed {
@@ -404,8 +404,8 @@ impl ConnectionDialog {
         };
         ui.add_space(4.0);
         egui::Frame::new()
-            .fill(color::DANGER.gamma_multiply(0.08))
-            .stroke(egui::Stroke::new(1.0, color::DANGER.gamma_multiply(0.4)))
+            .fill(color::danger().gamma_multiply(0.08))
+            .stroke(egui::Stroke::new(1.0, color::danger().gamma_multiply(0.4)))
             .corner_radius(4)
             .inner_margin(egui::Margin::same(8))
             .show(ui, |ui| {
@@ -415,13 +415,13 @@ impl ConnectionDialog {
                     None => format!("{}  {}", icon::X_CIRCLE, e.message),
                 };
                 ui.add(
-                    egui::Label::new(RichText::new(headline).color(color::DANGER))
+                    egui::Label::new(RichText::new(headline).color(color::danger()))
                         .wrap()
                         .selectable(true),
                 );
                 if let Some(detail) = &e.detail {
                     ui.add(
-                        egui::Label::new(RichText::new(detail).color(color::TEXT_DIM))
+                        egui::Label::new(RichText::new(detail).color(color::text_dim()))
                             .wrap()
                             .selectable(true),
                     );
@@ -452,12 +452,12 @@ impl ConnectionDialog {
                 TestState::Idle => {}
                 TestState::Running(_) => {
                     ui.add(egui::Spinner::new().size(14.0));
-                    ui.label(RichText::new("Testing…").color(color::TEXT_DIM));
+                    ui.label(RichText::new("Testing…").color(color::text_dim()));
                 }
                 TestState::Succeeded(version) => {
                     ui.label(
                         RichText::new(format!("{}  Connected · {version}", icon::CHECK_CIRCLE))
-                            .color(color::SUCCESS),
+                            .color(color::success()),
                     );
                 }
                 TestState::Failed(_) => {
@@ -465,13 +465,13 @@ impl ConnectionDialog {
                     // footer keeps a short status that never collides with the buttons.
                     ui.label(
                         RichText::new(format!("{}  Connection failed", icon::X_CIRCLE))
-                            .color(color::DANGER),
+                            .color(color::danger()),
                     );
                 }
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let save = Button::new(RichText::new("Save").color(Color32::WHITE).strong())
-                    .fill(color::ACCENT)
+                    .fill(color::accent())
                     .min_size(Vec2::new(84.0, 26.0));
                 if ui.add(save).clicked() {
                     match self.draft.validate() {
@@ -529,7 +529,7 @@ impl ConnectionDialog {
                     "Use a bastion host when the database is not reachable directly. \
                      The host and port on the General tab are then resolved on the SSH server.",
                 )
-                .color(color::TEXT_DIM),
+                .color(color::text_dim()),
             );
             if changed {
                 self.on_edit();
@@ -627,7 +627,7 @@ impl ConnectionDialog {
                 icon::INFO
             ))
             .small()
-            .color(color::TEXT_FAINT),
+            .color(color::text_faint()),
         );
         if changed {
             self.on_edit();
@@ -662,15 +662,15 @@ fn field(ui: &mut Ui, value: &mut String, hint: &str, issue: Option<&str>) -> bo
 
 fn issue_text(ui: &mut Ui, issue: Option<&str>) {
     if let Some(msg) = issue {
-        ui.label(RichText::new(msg).small().color(color::DANGER));
+        ui.label(RichText::new(msg).small().color(color::danger()));
     }
 }
 
 fn coming_soon(ui: &mut Ui, glyph: &str, title: &str, text: &str) {
     ui.add_space(30.0);
     ui.vertical_centered(|ui| {
-        ui.label(RichText::new(glyph).size(28.0).color(color::TEXT_FAINT));
+        ui.label(RichText::new(glyph).size(28.0).color(color::text_faint()));
         ui.label(RichText::new(title).strong());
-        ui.add(egui::Label::new(RichText::new(text).color(color::TEXT_DIM)).wrap());
+        ui.add(egui::Label::new(RichText::new(text).color(color::text_dim())).wrap());
     });
 }

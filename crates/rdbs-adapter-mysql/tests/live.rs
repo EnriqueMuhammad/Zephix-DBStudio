@@ -358,3 +358,91 @@ async fn explain_tree_and_analyze_rolls_back() {
     assert!(plan.analyzed);
     assert!(plan.roots[0].actual_rows.is_some(), "{plan:?}");
 }
+
+#[tokio::test]
+async fn routines_can_be_edited_and_executed() {
+    use rdbs_core::routine::{ArgValue, ParamMode, call_statement, edit_script};
+    use rdbs_core::schema::ObjectPath;
+    let Some(mut s) = session().await else { return };
+    s.execute(
+        "DROP FUNCTION IF EXISTS it_tax; DROP PROCEDURE IF EXISTS it_stats; \
+         CREATE FUNCTION it_tax(amount DECIMAL(12,2), rate DECIMAL(5,2)) RETURNS DECIMAL(12,2) \
+           DETERMINISTIC RETURN amount * rate / 100; \
+         CREATE PROCEDURE it_stats(IN label VARCHAR(20), INOUT counter INT, OUT total INT) \
+         BEGIN SET counter = counter + 1; SET total = CHAR_LENGTH(label); END",
+        CancelHandle::new(),
+    )
+    .await
+    .expect("create routines");
+    let path = |name: &str, kind| ObjectPath {
+        database: Some("rdbs_test".into()),
+        schema: None,
+        name: name.into(),
+        kind,
+    };
+
+    let f = s
+        .routine_signature(&path("it_tax", ObjectKind::Function))
+        .await
+        .expect("function signature");
+    assert_eq!(f.params.len(), 2, "{f:?}");
+    assert_eq!(f.params[0].data_type, "decimal(12,2)");
+    let sql = call_statement(
+        DatabaseKind::MySql,
+        "`rdbs_test`.`it_tax`",
+        ObjectKind::Function,
+        &f,
+        &[ArgValue::Text("200".into()), ArgValue::Text("5".into())],
+    );
+    let out = s
+        .execute(&sql, CancelHandle::new())
+        .await
+        .expect("call function");
+    assert_eq!(
+        out.last_result().expect("rows").rows[0][0],
+        CellValue::Decimal("10.00".into())
+    );
+
+    let p = s
+        .routine_signature(&path("it_stats", ObjectKind::Procedure))
+        .await
+        .expect("procedure signature");
+    let modes: Vec<ParamMode> = p.params.iter().map(|x| x.mode).collect();
+    assert_eq!(modes, [ParamMode::In, ParamMode::InOut, ParamMode::Out]);
+    let sql = call_statement(
+        DatabaseKind::MySql,
+        "`rdbs_test`.`it_stats`",
+        ObjectKind::Procedure,
+        &p,
+        &[
+            ArgValue::Text("hello".into()),
+            ArgValue::Text("41".into()),
+            ArgValue::Null,
+        ],
+    );
+    let out = s
+        .execute(&sql, CancelHandle::new())
+        .await
+        .expect("call procedure");
+    let row = &out.last_result().expect("rows").rows[0];
+    assert_eq!(row[0], CellValue::Int(42), "{row:?}");
+    assert_eq!(row[1], CellValue::Int(5), "{row:?}");
+
+    // The edit script (drop + create) recreates the procedure when run unchanged.
+    let ddl = s
+        .object_ddl(&path("it_stats", ObjectKind::Procedure))
+        .await
+        .expect("ddl");
+    let script = edit_script(
+        DatabaseKind::MySql,
+        "`rdbs_test`.`it_stats`",
+        ObjectKind::Procedure,
+        &ddl,
+    );
+    s.execute(&script, CancelHandle::new())
+        .await
+        .expect("edit script runs");
+    s.routine_signature(&path("it_stats", ObjectKind::Procedure))
+        .await
+        .expect("procedure still exists");
+}

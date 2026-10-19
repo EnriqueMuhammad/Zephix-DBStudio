@@ -415,3 +415,87 @@ async fn explain_estimates_and_analyze_rolls_back() {
         "ANALYZE was rolled back"
     );
 }
+
+#[tokio::test]
+async fn routines_can_be_edited_and_executed() {
+    use rdbs_core::routine::{ArgValue, ParamMode, call_statement, edit_script};
+    use rdbs_core::schema::ObjectPath;
+    let Some(mut s) = session().await else { return };
+    s.execute(
+        "DROP FUNCTION IF EXISTS public.it_tax(numeric, numeric); \
+         DROP PROCEDURE IF EXISTS public.it_proc(integer, integer); \
+         CREATE FUNCTION public.it_tax(amount numeric, rate numeric DEFAULT 10) \
+           RETURNS numeric LANGUAGE sql AS $$ SELECT amount * rate / 100 $$; \
+         CREATE PROCEDURE public.it_proc(IN a integer, INOUT doubled integer) \
+           LANGUAGE plpgsql AS $$ BEGIN doubled := a * 2; END $$;",
+        CancelHandle::new(),
+    )
+    .await
+    .expect("create routines");
+    let path = |name: &str, kind| ObjectPath {
+        database: None,
+        schema: Some("public".into()),
+        name: name.into(),
+        kind,
+    };
+
+    let f = s
+        .routine_signature(&path("it_tax", ObjectKind::Function))
+        .await
+        .expect("function signature");
+    assert_eq!(f.params.len(), 2);
+    assert_eq!(f.params[0].name, "amount");
+    assert_eq!(f.params[0].data_type, "numeric");
+    assert!(!f.returns_table);
+    let sql = call_statement(
+        DatabaseKind::PostgreSql,
+        "\"public\".\"it_tax\"",
+        ObjectKind::Function,
+        &f,
+        &[ArgValue::Text("200".into()), ArgValue::Text("5".into())],
+    );
+    let out = s
+        .execute(&sql, CancelHandle::new())
+        .await
+        .expect("call function");
+    assert_eq!(
+        out.last_result().expect("rows").rows[0][0],
+        CellValue::Decimal("10.0000000000000000".into())
+    );
+
+    let p = s
+        .routine_signature(&path("it_proc", ObjectKind::Procedure))
+        .await
+        .expect("procedure signature");
+    assert_eq!(p.params[1].mode, ParamMode::InOut);
+    let sql = call_statement(
+        DatabaseKind::PostgreSql,
+        "\"public\".\"it_proc\"",
+        ObjectKind::Procedure,
+        &p,
+        &[ArgValue::Text("21".into()), ArgValue::Null],
+    );
+    let out = s
+        .execute(&sql, CancelHandle::new())
+        .await
+        .expect("call procedure");
+    assert_eq!(
+        out.last_result().expect("rows").rows[0][0],
+        CellValue::Int(42)
+    );
+
+    // The edit script recreates the routine when run unchanged.
+    let ddl = s
+        .object_ddl(&path("it_tax", ObjectKind::Function))
+        .await
+        .expect("ddl");
+    let script = edit_script(
+        DatabaseKind::PostgreSql,
+        "\"public\".\"it_tax\"",
+        ObjectKind::Function,
+        &ddl,
+    );
+    s.execute(&script, CancelHandle::new())
+        .await
+        .expect("edit script runs");
+}

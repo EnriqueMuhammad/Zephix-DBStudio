@@ -162,11 +162,17 @@ impl Workspace {
 
     /// Focuses the welcome tab, re-opening it if it was closed.
     pub fn show_welcome(&mut self) {
-        match self.dock.find_tab_from(|t| matches!(t, Tab::Welcome)) {
-            Some(path) => {
-                let _ = self.dock.set_active_tab(path);
-            }
-            None => self.dock.push_to_focused_leaf(Tab::Welcome),
+        if self
+            .dock
+            .find_tab_from(|t| matches!(t, Tab::Welcome))
+            .is_none()
+        {
+            self.dock.push_to_focused_leaf(Tab::Welcome);
+        }
+        if let Some(path) = self.dock.find_tab_from(|t| matches!(t, Tab::Welcome)) {
+            let _ = self.dock.set_active_tab(path);
+            // Also focus its panel: a restored layout may have no focused panel at all.
+            self.dock.set_focused_node_and_surface(path.node_path());
         }
     }
 }
@@ -214,6 +220,9 @@ pub struct QueryTab {
     /// Table the tab was opened from; enables editing when it has a primary key.
     #[serde(default)]
     pub table: Option<rdbs_core::edit::TableTarget>,
+    /// Set for a data tab: the rows of one table or view, without an SQL editor.
+    #[serde(default)]
+    pub data_view: Option<DataView>,
     /// Editor contents.
     pub sql: String,
     /// Execution state (not persisted).
@@ -230,6 +239,7 @@ impl QueryTab {
             profile_id,
             database: None,
             table: None,
+            data_view: None,
             sql,
             run: RunState {
                 focus_editor: true,
@@ -244,6 +254,37 @@ impl QueryTab {
     }
 }
 
+/// What a data tab shows: one object, filtered, sorted and limited.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DataView {
+    /// Engine of the connection (decides the SQL dialect).
+    pub kind: rdbs_core::DatabaseKind,
+    /// Quoted, qualified object name.
+    pub qualified: String,
+    /// `WHERE` condition as typed (without the keyword).
+    pub filter: String,
+    /// `ORDER BY` list as typed (without the keywords).
+    pub order: String,
+    /// Row limit (`None` = all rows).
+    pub limit: Option<u32>,
+}
+
+impl DataView {
+    /// Row limits offered in the toolbar.
+    pub const LIMITS: [Option<u32>; 4] = [Some(100), Some(1000), Some(10_000), None];
+
+    /// The `SELECT` for the current filter, sort order and limit.
+    pub fn sql(&self) -> String {
+        rdbs_core::dialect::select_rows(
+            self.kind,
+            &self.qualified,
+            &self.filter,
+            &self.order,
+            self.limit,
+        )
+    }
+}
+
 /// Transient execution state of a query tab.
 #[derive(Default)]
 pub struct RunState {
@@ -253,6 +294,8 @@ pub struct RunState {
     pub last: Option<LastRun>,
     /// Grid selection.
     pub grid: GridState,
+    /// Selection of each grid when result sets are stacked.
+    pub stacked_grids: Vec<GridState>,
     /// Selected text in the editor as a byte range (empty selections are `None`).
     pub selection: Option<Range<usize>>,
     /// Request keyboard focus for the editor next frame.
@@ -370,6 +413,8 @@ impl TabViewer for TabContext<'_> {
             Tab::Query(q) => {
                 let glyph = if q.run.running.is_some() {
                     icon::CIRCLE_NOTCH
+                } else if q.data_view.is_some() {
+                    icon::TABLE
                 } else {
                     icon::FILE_SQL
                 };
@@ -410,5 +455,47 @@ impl TabViewer for TabContext<'_> {
     fn scroll_bars(&self, _tab: &Tab) -> [bool; 2] {
         // Tabs manage their own scroll areas (editor, grid).
         [false, false]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn active_is_welcome(w: &mut Workspace) -> bool {
+        matches!(w.dock.find_active_focused(), Some((_, Tab::Welcome)))
+    }
+
+    #[test]
+    fn show_welcome_reopens_and_focuses_the_home_page() {
+        let mut w = Workspace::default();
+        // Focus the query tab, then close the welcome tab.
+        let id = w.open_query_tab(None, String::new(), None);
+        assert!(!active_is_welcome(&mut w));
+        let path = w
+            .dock
+            .find_tab_from(|t| matches!(t, Tab::Welcome))
+            .expect("welcome");
+        w.dock.remove_tab(path);
+        assert!(
+            w.dock
+                .find_tab_from(|t| matches!(t, Tab::Welcome))
+                .is_none()
+        );
+
+        w.show_welcome();
+        assert!(active_is_welcome(&mut w));
+        assert!(w.query_tab_mut(id).is_some(), "other tabs are kept");
+
+        // Already open but behind another tab: brought to the front, not duplicated.
+        w.open_query_tab(None, String::new(), None);
+        w.show_welcome();
+        assert!(active_is_welcome(&mut w));
+        let count = w
+            .dock
+            .iter_all_tabs()
+            .filter(|(_, t)| matches!(t, Tab::Welcome))
+            .count();
+        assert_eq!(count, 1);
     }
 }

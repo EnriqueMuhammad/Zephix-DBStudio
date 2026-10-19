@@ -357,6 +357,14 @@ impl DatabaseAdapter for OracleAdapter {
         Box::pin(self.blocking(move |c| catalog::object_ddl(c, &object)))
     }
 
+    fn routine_signature<'a>(
+        &'a mut self,
+        object: &'a ObjectPath,
+    ) -> BoxFuture<'a, Result<rdbs_core::routine::RoutineSignature, DbError>> {
+        let object = object.clone();
+        Box::pin(self.blocking(move |c| catalog::routine_signature(c, &object)))
+    }
+
     fn describe_schema<'a>(
         &'a mut self,
         schema: Option<&'a str>,

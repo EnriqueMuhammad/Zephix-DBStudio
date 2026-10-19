@@ -223,7 +223,8 @@ impl Designer {
                 }
                 if let Some(n) = &self.rt.notice {
                     ui.label(
-                        RichText::new(format!("{}  {n}", icon::CHECK_CIRCLE)).color(color::SUCCESS),
+                        RichText::new(format!("{}  {n}", icon::CHECK_CIRCLE))
+                            .color(color::success()),
                     );
                 }
                 if self.rt.describe.is_some() && self.table.is_some() && self.rt.loaded.is_none() {
@@ -271,7 +272,7 @@ impl Designer {
             let statements = self.statements(kind);
             let has_changes = statements.as_ref().is_ok_and(|s| !s.is_empty());
             let save = Button::new(
-                RichText::new(format!("{}  Save", icon::FLOPPY_DISK)).color(color::SUCCESS),
+                RichText::new(format!("{}  Save", icon::FLOPPY_DISK)).color(color::success()),
             );
             let response = ui
                 .add_enabled(!busy && has_changes, save)
@@ -307,15 +308,15 @@ impl Designer {
             }
             if let Err(problem) = &statements {
                 ui.label(
-                    RichText::new(format!("{}  {problem}", icon::WARNING)).color(color::WARNING),
+                    RichText::new(format!("{}  {problem}", icon::WARNING)).color(color::warning()),
                 );
             }
         });
         if self.rt.confirm {
             let statements = self.statements(kind).unwrap_or_default();
             egui::Frame::new()
-                .fill(color::WARNING.gamma_multiply(0.1))
-                .stroke(egui::Stroke::new(1.0, color::WARNING.gamma_multiply(0.5)))
+                .fill(color::warning().gamma_multiply(0.1))
+                .stroke(egui::Stroke::new(1.0, color::warning().gamma_multiply(0.5)))
                 .corner_radius(6)
                 .inner_margin(egui::Margin::same(8))
                 .show(ui, |ui| {
@@ -326,11 +327,11 @@ impl Designer {
                             profile.name,
                             statements.len()
                         ))
-                        .color(color::WARNING),
+                        .color(color::warning()),
                     );
                     ui.horizontal(|ui| {
                         if ui
-                            .button(RichText::new("Apply changes").color(color::DANGER))
+                            .button(RichText::new("Apply changes").color(color::danger()))
                             .clicked()
                         {
                             self.rt.confirm = false;
@@ -407,7 +408,7 @@ impl Designer {
                 ui.label(
                     RichText::new("Column order of existing tables is kept by most engines")
                         .small()
-                        .color(color::TEXT_FAINT),
+                        .color(color::text_faint()),
                 );
             }
         });
@@ -421,7 +422,7 @@ impl Designer {
                 .spacing([10.0, 4.0])
                 .show(ui, |ui| {
                     for h in ["#", "Name", "Type", "Not null", "Key", "Auto", "Default"] {
-                        ui.label(RichText::new(h).strong().color(color::TEXT_DIM));
+                        ui.label(RichText::new(h).strong().color(color::text_dim()));
                     }
                     ui.end_row();
                     let draft = &mut self.rt.draft;
@@ -573,7 +574,7 @@ impl Designer {
                 .spacing([10.0, 4.0])
                 .show(ui, |ui| {
                     for h in ["Name", "Columns", "Unique", "Constraint", ""] {
-                        ui.label(RichText::new(h).strong().color(color::TEXT_DIM));
+                        ui.label(RichText::new(h).strong().color(color::text_dim()));
                     }
                     ui.end_row();
                     for (i, ix) in self.rt.draft.indexes.iter_mut().enumerate() {
@@ -610,7 +611,7 @@ impl Designer {
             ui.label(
                 RichText::new("SQLite rebuilds the table to change unique constraints.")
                     .small()
-                    .color(color::TEXT_FAINT),
+                    .color(color::text_faint()),
             );
         }
     }
@@ -665,7 +666,7 @@ impl Designer {
                         "Referenced columns",
                         "",
                     ] {
-                        ui.label(RichText::new(h).strong().color(color::TEXT_DIM));
+                        ui.label(RichText::new(h).strong().color(color::text_dim()));
                     }
                     ui.end_row();
                     for (i, fk) in self.rt.draft.foreign_keys.iter_mut().enumerate() {

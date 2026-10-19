@@ -119,6 +119,7 @@ fn command_name(command: &Command) -> &'static str {
         Command::LoadDatabase { .. } => "LoadDatabase",
         Command::ApplyChanges { .. } => "ApplyChanges",
         Command::GetDdl { .. } => "GetDdl",
+        Command::GetRoutine { .. } => "GetRoutine",
         Command::DescribeSchema { .. } => "DescribeSchema",
         Command::RunScript { .. } => "RunScript",
         Command::Explain { .. } => "Explain",
@@ -209,6 +210,19 @@ impl Worker {
                     let w = self.clone();
                     tokio::spawn(async move {
                         w.get_ddl(request_id, profile, database, object, password)
+                            .await;
+                    });
+                }
+                Command::GetRoutine {
+                    request_id,
+                    profile,
+                    database,
+                    object,
+                    password,
+                } => {
+                    let w = self.clone();
+                    tokio::spawn(async move {
+                        w.get_routine(request_id, profile, database, object, password)
                             .await;
                     });
                 }
@@ -783,6 +797,31 @@ impl Worker {
         }
         .await;
         self.emitter.emit(Event::DdlLoaded { request_id, result });
+    }
+
+    async fn get_routine(
+        &self,
+        request_id: RequestId,
+        profile: ConnectionProfile,
+        database: Option<String>,
+        object: rdbs_core::schema::ObjectPath,
+        password: Option<String>,
+    ) {
+        let (key, effective) = Self::target(&profile, database);
+        let main_session = key.1.is_none();
+        let slot = self.slot(key);
+        let mut session = slot.lock().await;
+        let result = async {
+            self.ensure_connected(&effective, password, &mut session, main_session)
+                .await?;
+            match session.as_mut() {
+                Some(adapter) => adapter.routine_signature(&object).await,
+                None => Err(DbError::new(DbErrorKind::Internal, "session unavailable")),
+            }
+        }
+        .await;
+        self.emitter
+            .emit(Event::RoutineLoaded { request_id, result });
     }
 
     async fn test(

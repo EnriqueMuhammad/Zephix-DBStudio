@@ -15,14 +15,88 @@ use crate::widgets::format_count;
 
 /// Maximum number of characters rendered per cell (full value is still copyable).
 const MAX_CELL_CHARS: usize = 120;
+/// Row and header heights.
+const ROW_HEIGHT: f32 = 22.0;
+const HEADER_HEIGHT: f32 = 24.0;
+/// Space between a cell's border and its text.
+const CELL_PAD: f32 = 6.0;
+/// Rows measured to size the columns.
+const MEASURED_ROWS: usize = 200;
+
+/// Font of cell and header text.
+fn cell_font() -> egui::FontId {
+    egui::FontId::proportional(13.0)
+}
 
 /// Grid interaction state.
 #[derive(Debug, Default, Clone)]
 pub struct GridState {
     /// Selected cell as (row, column); rows past the result are pending new rows.
     pub selected: Option<(usize, usize)>,
+    /// Whole rows selected with the row numbers (Ctrl toggles, Shift extends, "#" selects all).
+    pub rows: std::collections::BTreeSet<usize>,
+    /// Row a Shift-click extends from.
+    pub anchor: Option<usize>,
     /// Whether the grid owns keyboard shortcuts (last click was inside it).
     pub active: bool,
+    /// Column widths fitted to the content, for the result identified by the key.
+    widths: Option<(u64, Vec<f32>)>,
+}
+
+/// Identity of a result's shape: columns and row count.
+fn shape_key(rs: &ResultSet) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for c in &rs.columns {
+        c.name.hash(&mut h);
+        c.type_name.hash(&mut h);
+    }
+    rs.rows.len().hash(&mut h);
+    h.finish()
+}
+
+/// Widths that fit each column's name and its first rows, like SQL Server's grid.
+fn fit_widths(ctx: &egui::Context, rs: &ResultSet) -> Vec<f32> {
+    let font = cell_font();
+    ctx.fonts_mut(|f| {
+        let mut measure = |text: &str| {
+            f.layout_no_wrap(text.to_owned(), font.clone(), Color32::WHITE)
+                .size()
+                .x
+        };
+        rs.columns
+            .iter()
+            .enumerate()
+            .map(|(c, col)| {
+                let mut width = measure(&col.name);
+                for row in rs.rows.iter().take(MEASURED_ROWS) {
+                    if let Some(v) = row.get(c) {
+                        width = width.max(measure(&display_text(v)));
+                    }
+                }
+                (width + 2.0 * CELL_PAD + 4.0).clamp(40.0, 420.0)
+            })
+            .collect()
+    })
+}
+
+/// Height that shows every row of `rs` (plus room for a horizontal scroll bar).
+#[allow(clippy::cast_precision_loss)]
+pub fn fitted_height(rs: &ResultSet) -> f32 {
+    HEADER_HEIGHT + ROW_HEIGHT * rs.rows.len() as f32 + 14.0
+}
+
+/// Height of a grid without rows: the header and a little space.
+pub fn empty_height() -> f32 {
+    HEADER_HEIGHT + ROW_HEIGHT + 14.0
+}
+
+/// Thin border at the right and bottom of a cell.
+fn cell_lines(ui: &Ui) {
+    let r = ui.max_rect();
+    let stroke = egui::Stroke::new(1.0, color::border());
+    ui.painter().hline(r.x_range(), r.bottom() - 0.5, stroke);
+    ui.painter().vline(r.right() - 0.5, r.y_range(), stroke);
 }
 
 /// A row of the grid: one from the result, or a pending new row.
@@ -82,6 +156,65 @@ pub fn row_as_tsv(rs: &ResultSet, row: usize) -> String {
         .unwrap_or_default()
 }
 
+/// Tab-separated rows (in result order), optionally preceded by the column names; pastes as a
+/// table into spreadsheets.
+pub fn rows_as_tsv(rs: &ResultSet, rows: impl IntoIterator<Item = usize>, headers: bool) -> String {
+    let mut lines = Vec::new();
+    if headers {
+        lines.push(
+            rs.columns
+                .iter()
+                .map(|c| c.name.as_str())
+                .collect::<Vec<_>>()
+                .join("\t"),
+        );
+    }
+    lines.extend(
+        rows.into_iter()
+            .filter(|r| *r < rs.rows.len())
+            .map(|r| row_as_tsv(rs, r)),
+    );
+    lines.join("\n")
+}
+
+/// Text Ctrl+C copies: the selected rows, else the selected cell (with its column name when
+/// `headers`).
+fn selection_text(rs: &ResultSet, state: &GridState, headers: bool) -> Option<String> {
+    if !state.rows.is_empty() {
+        return Some(rows_as_tsv(rs, state.rows.iter().copied(), headers));
+    }
+    let (r, c) = state.selected?;
+    let value = copy_text(rs.cell(r, c)?);
+    Some(match (headers, rs.columns.get(c)) {
+        (true, Some(col)) => format!("{}\n{value}", col.name),
+        _ => value,
+    })
+}
+
+/// Updates the row selection for a click on row `r` with the given modifiers.
+fn click_row(state: &mut GridState, r: usize, modifiers: egui::Modifiers) {
+    state.selected = None;
+    match (modifiers.shift, state.anchor) {
+        (true, Some(anchor)) => {
+            if !modifiers.command {
+                state.rows.clear();
+            }
+            state.rows.extend(anchor.min(r)..=anchor.max(r));
+        }
+        _ if modifiers.command => {
+            if !state.rows.remove(&r) {
+                state.rows.insert(r);
+            }
+            state.anchor = Some(r);
+        }
+        _ => {
+            state.rows.clear();
+            state.rows.insert(r);
+            state.anchor = Some(r);
+        }
+    }
+}
+
 fn display_text(value: &CellValue) -> String {
     truncate_line(&value.to_string())
 }
@@ -109,16 +242,17 @@ enum Shown<'a> {
 fn rich(shown: &Shown<'_>) -> RichText {
     match shown {
         Shown::Original(CellValue::Null) | Shown::Pending(EditValue::Null) => {
-            RichText::new("NULL").italics().color(color::TEXT_FAINT)
+            RichText::new("NULL").italics().color(color::text_faint())
         }
         Shown::Pending(EditValue::Default) => RichText::new("(default)")
             .italics()
-            .color(color::TEXT_FAINT),
-        Shown::Pending(EditValue::Text(t)) => RichText::new(truncate_line(t)).color(color::TEXT),
+            .color(color::text_faint()),
+        Shown::Pending(EditValue::Text(t)) => RichText::new(truncate_line(t)).color(color::text()),
         Shown::Original(value) => {
             let fg = match value {
-                CellValue::Bool(_) => Color32::from_rgb(0xC0, 0x9B, 0xF7),
-                v if v.is_numeric() => color::TEXT,
+                CellValue::Bool(_) => crate::theme::palette().syntax[5],
+                v if v.is_numeric() => color::text(),
+                _ if crate::theme::is_light() => color::text(),
                 _ => Color32::from_rgb(0xC8, 0xCD, 0xD6),
             };
             RichText::new(display_text(value)).color(fg)
@@ -144,12 +278,22 @@ pub fn show(
     mut edit: Option<EditMode<'_>>,
 ) {
     let ctx = ui.ctx().clone();
-    let row_height = 22.0;
     let existing = rs.rows.len();
     let added = edit.as_ref().map_or(0, |e| e.edits.inserted.len());
     let n_rows = existing + added;
-    let gutter = 12.0 + 8.0 * format_count(n_rows as u64).len() as f32;
+    #[allow(clippy::cast_precision_loss)]
+    let gutter = (2.0 * CELL_PAD + 7.5 * format_count(n_rows as u64).len() as f32).max(30.0);
     let mono = theme::mono();
+    let font = cell_font();
+    let key = shape_key(rs);
+    if state.widths.as_ref().is_none_or(|(k, _)| *k != key) {
+        state.widths = Some((key, fit_widths(&ctx, rs)));
+    }
+    let widths = state
+        .widths
+        .as_ref()
+        .map(|(_, w)| w.clone())
+        .unwrap_or_default();
     let mut clicked_inside = false;
     let mut ops: Vec<GridOp> = Vec::new();
     let editable = edit.is_some();
@@ -162,40 +306,62 @@ pub fn show(
         .id_salt(id.with("h"))
         .auto_shrink(false)
         .show(ui, |ui| {
-            TableBuilder::new(ui)
-                .id_salt(id.with("table"))
-                .striped(true)
+            // Cells touch, so their borders form one grid; text gets its own padding.
+            ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
+            let mut table = TableBuilder::new(ui)
+                // A new shape of result gets fresh (fitted) column widths.
+                .id_salt(id.with(("table", key)))
+                .striped(false)
                 .resizable(true)
                 .sense(Sense::click())
                 .auto_shrink(false)
                 .min_scrolled_height(0.0)
                 .max_scroll_height(f32::INFINITY)
                 .cell_layout(Layout::left_to_right(Align::Center))
-                .column(Column::exact(gutter))
-                .columns(
-                    Column::initial(150.0).at_least(48.0).clip(true),
-                    rs.columns.len(),
-                )
-                .header(30.0, |mut header| {
+                .column(Column::exact(gutter));
+            for w in &widths {
+                table = table.column(Column::initial(*w).at_least(32.0).clip(true));
+            }
+            table
+                .header(HEADER_HEIGHT, |mut header| {
                     header.col(|ui| {
-                        ui.label(RichText::new("#").color(color::TEXT_FAINT));
+                        // The blank corner selects every row; right-click to copy them.
+                        let rect = ui.max_rect();
+                        let corner = ui.interact(rect, id.with("corner"), Sense::click());
+                        let fill = if corner.hovered() {
+                            color::surface_hover()
+                        } else {
+                            color::surface()
+                        };
+                        ui.painter().rect_filled(rect, 0, fill);
+                        cell_lines(ui);
+                        let corner = corner.on_hover_text("Select all rows");
+                        if corner.clicked() || corner.secondary_clicked() {
+                            state.selected = None;
+                            state.rows = (0..existing).collect();
+                            clicked_inside = true;
+                        }
+                        corner.context_menu(|ui| rows_menu(ui, &ctx, rs, state));
                     });
                     for col in &rs.columns {
                         header.col(|ui| {
-                            ui.vertical(|ui| {
-                                ui.spacing_mut().item_spacing.y = 0.0;
-                                ui.label(RichText::new(&col.name).strong().color(color::TEXT));
-                                ui.label(
-                                    RichText::new(&col.type_name)
-                                        .size(10.5)
-                                        .color(color::TEXT_FAINT),
-                                );
-                            });
+                            ui.painter().rect_filled(ui.max_rect(), 0, color::surface());
+                            cell_lines(ui);
+                            ui.add_space(CELL_PAD);
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(&col.name)
+                                        .font(font.clone())
+                                        .color(color::text()),
+                                )
+                                .truncate(),
+                            )
+                            .on_hover_text(format!("{}\n{}", col.name, col.type_name));
                         });
                     }
                 })
                 .body(|body| {
-                    body.rows(row_height, n_rows, |mut row| {
+                    body.rows(ROW_HEIGHT, n_rows, |mut row| {
                         let r = row.index();
                         let row_ref = if r < existing {
                             RowRef::Existing(r)
@@ -204,20 +370,44 @@ pub fn show(
                         };
                         let deleted = matches!(row_ref, RowRef::Existing(i)
                             if edits.is_some_and(|e| e.deleted.contains(&i)));
-                        row.set_selected(state.selected.is_some_and(|(sr, _)| sr == r));
-                        row.col(|ui| {
-                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                let label = match row_ref {
-                                    RowRef::Existing(i) => (i + 1).to_string(),
-                                    RowRef::New(_) => "+".to_owned(),
-                                };
-                                ui.label(
-                                    RichText::new(label)
-                                        .font(mono.clone())
-                                        .color(color::TEXT_FAINT),
-                                );
-                            });
+                        row.set_selected(
+                            state.rows.contains(&r)
+                                || state.selected.is_some_and(|(sr, _)| sr == r),
+                        );
+                        let (_, gutter_response) = row.col(|ui| {
+                            ui.painter().rect_filled(
+                                ui.max_rect(),
+                                0,
+                                color::surface().gamma_multiply(0.6),
+                            );
+                            cell_lines(ui);
+                            let label = match row_ref {
+                                RowRef::Existing(i) => (i + 1).to_string(),
+                                RowRef::New(_) => "+".to_owned(),
+                            };
+                            ui.add_space(CELL_PAD);
+                            ui.label(
+                                RichText::new(label)
+                                    .font(font.clone())
+                                    .color(color::text_dim()),
+                            );
                         });
+                        if let RowRef::Existing(i) = row_ref {
+                            if gutter_response.clicked() {
+                                let modifiers = ui_modifiers(&ctx);
+                                click_row(state, i, modifiers);
+                                clicked_inside = true;
+                            }
+                            if gutter_response.secondary_clicked() {
+                                if !state.rows.contains(&i) {
+                                    click_row(state, i, egui::Modifiers::NONE);
+                                }
+                                clicked_inside = true;
+                            }
+                            gutter_response.context_menu(|ui| {
+                                rows_menu(ui, &ctx, rs, state);
+                            });
+                        }
                         for c in 0..rs.columns.len() {
                             let original = match row_ref {
                                 RowRef::Existing(i) => rs.cell(i, c),
@@ -244,11 +434,11 @@ pub fn show(
 
                             let (_, response) = row.col(|ui| {
                                 let tint = if deleted {
-                                    Some(color::DANGER.gamma_multiply(0.16))
+                                    Some(color::danger().gamma_multiply(0.16))
                                 } else if matches!(row_ref, RowRef::New(_)) {
-                                    Some(color::SUCCESS.gamma_multiply(0.12))
+                                    Some(color::success().gamma_multiply(0.12))
                                 } else if pending.is_some() {
-                                    Some(color::WARNING.gamma_multiply(0.20))
+                                    Some(color::warning().gamma_multiply(0.20))
                                 } else {
                                     None
                                 };
@@ -256,13 +446,20 @@ pub fn show(
                                     ui.painter().rect_filled(ui.max_rect(), 0, tint);
                                 }
                                 if is_selected {
+                                    let rect = ui.max_rect();
+                                    ui.painter().rect_filled(
+                                        rect,
+                                        0,
+                                        color::accent().gamma_multiply(0.35),
+                                    );
                                     ui.painter().rect_stroke(
-                                        ui.max_rect().shrink(1.0),
-                                        2,
-                                        egui::Stroke::new(1.5, color::ACCENT),
+                                        rect.shrink(0.5),
+                                        0,
+                                        egui::Stroke::new(1.0, color::accent()),
                                         egui::StrokeKind::Inside,
                                     );
                                 }
+                                cell_lines(ui);
                                 if is_editing
                                     && let Some(cell) =
                                         editing.as_deref_mut().and_then(Option::as_mut)
@@ -285,22 +482,33 @@ pub fn show(
                                     }
                                     return;
                                 }
-                                let mut text = rich(&shown).font(mono.clone());
+                                let mut text = rich(&shown).font(font.clone());
                                 if deleted {
-                                    text = text.strikethrough().color(color::TEXT_FAINT);
+                                    text = text.strikethrough().color(color::text_faint());
                                 }
                                 let label = egui::Label::new(text).selectable(false).truncate();
                                 let right = matches!(shown, Shown::Original(v) if v.is_numeric());
                                 if right {
                                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                        ui.add_space(CELL_PAD);
                                         ui.add(label)
                                     });
                                 } else {
+                                    ui.add_space(CELL_PAD);
                                     ui.add(label);
                                 }
                             });
-                            if response.clicked() || response.secondary_clicked() {
+                            let in_selected_rows =
+                                matches!(row_ref, RowRef::Existing(i) if state.rows.contains(&i));
+                            if response.clicked()
+                                || (response.secondary_clicked() && !in_selected_rows)
+                            {
                                 state.selected = Some((r, c));
+                                state.rows.clear();
+                                state.anchor = match row_ref {
+                                    RowRef::Existing(i) => Some(i),
+                                    RowRef::New(_) => None,
+                                };
                                 clicked_inside = true;
                             }
                             let can_edit = editable && !deleted && !binary;
@@ -321,7 +529,9 @@ pub fn show(
                                     );
                                     ui.separator();
                                 }
-                                if let RowRef::Existing(i) = row_ref {
+                                if in_selected_rows {
+                                    rows_menu(ui, &ctx, rs, state);
+                                } else if let RowRef::Existing(i) = row_ref {
                                     cell_menu(ui, &ctx, rs, i, c);
                                 }
                             });
@@ -350,13 +560,58 @@ pub fn show(
         state.active = false;
     }
     let typing = ctx.memory(|m| m.focused().is_some());
-    if state.active
-        && !typing
-        && let Some((r, c)) = state.selected
-        && ui.input(|i| i.events.iter().any(|e| matches!(e, Event::Copy)))
-        && let Some(value) = rs.cell(r, c)
+    if state.active && !typing {
+        // Ctrl+C copies the selection; with Shift (Ctrl+Shift+C) the column names come first.
+        let copy = ui.input(|i| {
+            i.events
+                .iter()
+                .any(|e| matches!(e, Event::Copy))
+                .then_some(i.modifiers.shift)
+        });
+        if let Some(headers) = copy
+            && let Some(text) = selection_text(rs, state, headers)
+        {
+            ctx.copy_text(text);
+        }
+        if ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, Key::A)) {
+            state.selected = None;
+            state.rows = (0..existing).collect();
+        }
+    }
+}
+
+fn ui_modifiers(ctx: &egui::Context) -> egui::Modifiers {
+    ctx.input(|i| i.modifiers)
+}
+
+/// Menu for selected rows.
+fn rows_menu(ui: &mut Ui, ctx: &egui::Context, rs: &ResultSet, state: &GridState) {
+    let n = state.rows.len();
+    let what = if n == 1 {
+        "row".to_owned()
+    } else {
+        format!("{} rows", format_count(n as u64))
+    };
+    if ui
+        .button(format!("{}  Copy {what}", icon::COPY))
+        .on_hover_text("Ctrl+C")
+        .clicked()
     {
-        ctx.copy_text(copy_text(value));
+        ctx.copy_text(rows_as_tsv(rs, state.rows.iter().copied(), false));
+    }
+    if ui
+        .button(format!("{}  Copy {what} with headers", icon::TABLE))
+        .on_hover_text("Ctrl+Shift+C")
+        .clicked()
+    {
+        ctx.copy_text(rows_as_tsv(rs, state.rows.iter().copied(), true));
+    }
+    ui.separator();
+    if ui
+        .button(format!("{}  Copy all rows with headers", icon::ROWS))
+        .clicked()
+    {
+        ctx.copy_text(rows_as_tsv(rs, 0..rs.rows.len(), true));
     }
 }
 
@@ -479,17 +734,30 @@ fn edit_menu(
 }
 
 fn cell_menu(ui: &mut Ui, ctx: &egui::Context, rs: &ResultSet, r: usize, c: usize) {
-    if ui.button(format!("{}  Copy value", icon::COPY)).clicked()
+    if ui
+        .button(format!("{}  Copy value", icon::COPY))
+        .on_hover_text("Ctrl+C")
+        .clicked()
         && let Some(v) = rs.cell(r, c)
     {
         ctx.copy_text(copy_text(v));
     }
-    if ui
-        .button(format!("{}  Copy row (TSV)", icon::ROWS))
-        .clicked()
-    {
+    if ui.button(format!("{}  Copy row", icon::ROWS)).clicked() {
         ctx.copy_text(row_as_tsv(rs, r));
     }
+    if ui
+        .button(format!("{}  Copy row with headers", icon::TABLE))
+        .clicked()
+    {
+        ctx.copy_text(rows_as_tsv(rs, [r], true));
+    }
+    if ui
+        .button(format!("{}  Copy all rows with headers", icon::ROWS))
+        .clicked()
+    {
+        ctx.copy_text(rows_as_tsv(rs, 0..rs.rows.len(), true));
+    }
+    ui.separator();
     if ui
         .button(format!("{}  Copy column name", icon::COLUMNS))
         .clicked()
@@ -509,6 +777,45 @@ mod tests {
             columns: vec![ColumnMeta::new("a", "int"), ColumnMeta::new("b", "text")],
             rows: vec![vec![CellValue::Int(7), CellValue::Null]],
         }
+    }
+
+    #[test]
+    fn copies_rows_with_and_without_headers() {
+        let mut rs = rs();
+        rs.rows
+            .push(vec![CellValue::Int(8), CellValue::Text("x".into())]);
+        assert_eq!(rows_as_tsv(&rs, [1, 0], false), "8\tx\n7\t");
+        assert_eq!(rows_as_tsv(&rs, [0], true), "a\tb\n7\t");
+        assert_eq!(rows_as_tsv(&rs, [5], true), "a\tb");
+
+        let mut state = GridState::default();
+        click_row(&mut state, 0, egui::Modifiers::NONE);
+        click_row(&mut state, 1, egui::Modifiers::SHIFT);
+        assert_eq!(state.rows.iter().copied().collect::<Vec<_>>(), [0, 1]);
+        assert_eq!(
+            selection_text(&rs, &state, true).as_deref(),
+            Some("a\tb\n7\t\n8\tx")
+        );
+        click_row(&mut state, 0, egui::Modifiers::COMMAND);
+        assert_eq!(state.rows.iter().copied().collect::<Vec<_>>(), [1]);
+
+        state.rows.clear();
+        state.selected = Some((1, 1));
+        assert_eq!(selection_text(&rs, &state, false).as_deref(), Some("x"));
+        assert_eq!(selection_text(&rs, &state, true).as_deref(), Some("b\nx"));
+    }
+
+    #[test]
+    fn widths_are_refitted_when_the_result_changes() {
+        let a = rs();
+        let mut b = rs();
+        assert_eq!(shape_key(&a), shape_key(&b));
+        b.rows.push(vec![CellValue::Int(1), CellValue::Null]);
+        assert_ne!(shape_key(&a), shape_key(&b));
+        b.columns[1].name = "renamed".into();
+        assert_ne!(shape_key(&a), shape_key(&b));
+        // One header plus one row, and room for the scroll bar.
+        assert!((fitted_height(&a) - (HEADER_HEIGHT + ROW_HEIGHT + 14.0)).abs() < f32::EPSILON);
     }
 
     #[test]

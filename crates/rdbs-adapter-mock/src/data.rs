@@ -296,6 +296,114 @@ fn schema_contents(kind: DatabaseKind) -> Vec<DbObject> {
     folders
 }
 
+/// Parameters of the sample routines.
+pub fn sample_routine(name: &str) -> Option<rdbs_core::routine::RoutineSignature> {
+    use rdbs_core::routine::{ParamMode, RoutineParam, RoutineSignature};
+    let param = |name: &str, data_type: &str, mode: ParamMode| RoutineParam {
+        name: name.to_owned(),
+        data_type: data_type.to_owned(),
+        mode,
+    };
+    let params = match name {
+        "calc_tax" => vec![
+            param("amount", "numeric(12,2)", ParamMode::In),
+            param("rate", "numeric(5,2)", ParamMode::In),
+        ],
+        "customer_tier" => vec![param("customer_id", "integer", ParamMode::In)],
+        "refresh_statistics" => Vec::new(),
+        "archive_orders" => vec![
+            param("before_date", "date", ParamMode::In),
+            param("moved", "integer", ParamMode::Out),
+        ],
+        _ => return None,
+    };
+    Some(RoutineSignature {
+        params,
+        returns_table: false,
+    })
+}
+
+/// Definition of a sample view or routine, roughly as `kind` would report it.
+pub fn sample_routine_ddl(
+    kind: DatabaseKind,
+    object: &rdbs_core::schema::ObjectPath,
+) -> Option<String> {
+    let name = rdbs_core::dialect::qualified_name(
+        kind,
+        object.database.as_deref(),
+        object.schema.as_deref(),
+        &object.name,
+    );
+    let signature = sample_routine(&object.name);
+    let params = signature
+        .as_ref()
+        .map(|s| {
+            s.params
+                .iter()
+                .map(|p| match kind {
+                    DatabaseKind::SqlServer => format!(
+                        "@{} {}{}",
+                        p.name,
+                        p.data_type,
+                        if p.mode.returns_value() {
+                            " OUTPUT"
+                        } else {
+                            ""
+                        }
+                    ),
+                    _ => format!(
+                        "{}{} {}",
+                        if p.mode.returns_value() { "OUT " } else { "" },
+                        p.name,
+                        p.data_type
+                    ),
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .unwrap_or_default();
+    let body = match kind {
+        DatabaseKind::SqlServer => "AS\nBEGIN\n    SET NOCOUNT ON;\n    -- sample body\nEND",
+        DatabaseKind::MySql | DatabaseKind::MariaDb => "BEGIN\n    -- sample body\nEND",
+        _ => "AS $$\nBEGIN\n    -- sample body\nEND;\n$$ LANGUAGE plpgsql",
+    };
+    match object.kind {
+        ObjectKind::View | ObjectKind::MaterializedView => Some(format!(
+            "CREATE VIEW {name} AS\nSELECT id, full_name, country\nFROM customers\nWHERE is_active;"
+        )),
+        ObjectKind::Function => {
+            signature.as_ref()?;
+            let returns = if object.name == "customer_tier" {
+                "text"
+            } else {
+                "numeric"
+            };
+            Some(match kind {
+                DatabaseKind::SqlServer => {
+                    format!("CREATE FUNCTION {name}({params})\nRETURNS {returns}\n{body}")
+                }
+                DatabaseKind::MySql | DatabaseKind::MariaDb => format!(
+                    "CREATE DEFINER=`app`@`%` FUNCTION {name}({params}) RETURNS {returns}\n{body};"
+                ),
+                _ => format!(
+                    "CREATE OR REPLACE FUNCTION {name}({params})\n RETURNS {returns}\n {body};"
+                ),
+            })
+        }
+        ObjectKind::Procedure => {
+            signature.as_ref()?;
+            Some(match kind {
+                DatabaseKind::SqlServer => format!("CREATE PROCEDURE {name} {params}\n{body}"),
+                DatabaseKind::MySql | DatabaseKind::MariaDb => {
+                    format!("CREATE DEFINER=`app`@`%` PROCEDURE {name}({params})\n{body};")
+                }
+                _ => format!("CREATE OR REPLACE PROCEDURE {name}({params})\n {body};"),
+            })
+        }
+        _ => None,
+    }
+}
+
 /// Structured definitions of the sample tables (in `schema`, for engines with schemas).
 pub fn sample_tables(kind: DatabaseKind, schema: Option<&str>) -> Vec<TableSchema> {
     let schema = schema.map(str::to_owned).or_else(|| match kind {

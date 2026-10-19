@@ -269,6 +269,13 @@ impl DatabaseAdapter for PostgresAdapter {
         Box::pin(ddl::object_ddl(&self.client, object))
     }
 
+    fn routine_signature<'a>(
+        &'a mut self,
+        object: &'a rdbs_core::schema::ObjectPath,
+    ) -> BoxFuture<'a, Result<rdbs_core::routine::RoutineSignature, DbError>> {
+        Box::pin(ddl::routine_signature(&self.client, object))
+    }
+
     fn explain<'a>(
         &'a mut self,
         sql: &'a str,

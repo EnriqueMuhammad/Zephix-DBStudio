@@ -1,7 +1,7 @@
 //! Execution plan viewer: an indented operator tree with relative cost bars, estimated vs.
 //! actual rows, and the raw plan text.
 
-use egui::{Align, Color32, Layout, RichText, ScrollArea, Sense, Ui, Vec2};
+use egui::{Align, Layout, RichText, ScrollArea, Sense, Ui, Vec2};
 use egui_extras::{Column, TableBuilder};
 use egui_phosphor::regular as icon;
 use rdbs_core::plan::{ExplainPlan, PlanNode};
@@ -61,7 +61,7 @@ pub fn show(ui: &mut Ui, plan: &ExplainPlan, state: &mut PlanViewState) {
         };
         ui.label(RichText::new(label).strong());
         for note in &plan.notes {
-            ui.label(RichText::new(format!("·  {note}")).color(color::TEXT_DIM));
+            ui.label(RichText::new(format!("·  {note}")).color(color::text_dim()));
         }
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             ui.add_space(8.0);
@@ -122,7 +122,7 @@ pub fn show(ui: &mut Ui, plan: &ExplainPlan, state: &mut PlanViewState) {
             .header(22.0, |mut header| {
                 let mut head = |text: &str| {
                     header.col(|ui| {
-                        ui.label(RichText::new(text).strong().color(color::TEXT_DIM));
+                        ui.label(RichText::new(text).strong().color(color::text_dim()));
                     });
                 };
                 head("Operation");
@@ -148,7 +148,7 @@ pub fn show(ui: &mut Ui, plan: &ExplainPlan, state: &mut PlanViewState) {
                         } else {
                             icon::CARET_DOWN
                         };
-                        ui.label(RichText::new(glyph).color(color::TEXT_FAINT));
+                        ui.label(RichText::new(glyph).color(color::text_faint()));
                         let response = ui.label(&node.operation);
                         if !node.details.is_empty() {
                             response.on_hover_ui(|ui| {
@@ -160,7 +160,7 @@ pub fn show(ui: &mut Ui, plan: &ExplainPlan, state: &mut PlanViewState) {
                     });
                     row.col(|ui| {
                         if let Some(object) = &node.object {
-                            ui.label(RichText::new(object).color(color::ACCENT));
+                            ui.label(RichText::new(object).color(color::accent()));
                         }
                     });
                     row.col(|ui| {
@@ -183,7 +183,7 @@ pub fn show(ui: &mut Ui, plan: &ExplainPlan, state: &mut PlanViewState) {
                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                                 let text = RichText::new(number(node.actual_rows));
                                 let response = ui.label(if warn {
-                                    text.color(color::WARNING)
+                                    text.color(color::warning())
                                 } else {
                                     text
                                 });
@@ -218,15 +218,15 @@ pub fn show(ui: &mut Ui, plan: &ExplainPlan, state: &mut PlanViewState) {
                 ui.horizontal_wrapped(|ui| {
                     ui.label(RichText::new(&node.operation).strong());
                     if let Some(o) = &node.object {
-                        ui.label(RichText::new(o).color(color::ACCENT));
+                        ui.label(RichText::new(o).color(color::accent()));
                     }
                 });
                 if node.details.is_empty() {
-                    ui.label(RichText::new("No further properties").color(color::TEXT_FAINT));
+                    ui.label(RichText::new("No further properties").color(color::text_faint()));
                 }
                 for (k, v) in &node.details {
                     ui.horizontal_wrapped(|ui| {
-                        ui.label(RichText::new(format!("{k}:")).color(color::TEXT_DIM));
+                        ui.label(RichText::new(format!("{k}:")).color(color::text_dim()));
                         ui.add(
                             egui::Label::new(RichText::new(v).font(theme::mono())).selectable(true),
                         );
@@ -239,15 +239,15 @@ pub fn show(ui: &mut Ui, plan: &ExplainPlan, state: &mut PlanViewState) {
 fn cost_bar(ui: &mut Ui, fraction: f32, label: &str) {
     let (rect, _) = ui.allocate_exact_size(Vec2::new(60.0, 10.0), Sense::hover());
     let painter = ui.painter();
-    painter.rect_filled(rect, 2.0, color::SURFACE);
+    painter.rect_filled(rect, 2.0, color::surface());
     let mut fill = rect;
     fill.set_width(rect.width() * fraction.clamp(0.0, 1.0));
     let tint = if fraction > 0.66 {
-        color::DANGER
+        color::danger()
     } else if fraction > 0.33 {
-        color::WARNING
+        color::warning()
     } else {
-        Color32::from_rgb(0x3D, 0x8B, 0xFD)
+        color::accent()
     };
     painter.rect_filled(fill, 2.0, tint.gamma_multiply(0.8));
     ui.label(RichText::new(label).size(12.0));

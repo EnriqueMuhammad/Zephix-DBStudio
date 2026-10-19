@@ -19,30 +19,41 @@ use crate::workspace::{LastRun, QueryTab, RunState, Running, TabContext};
 
 /// Renders a query tab.
 pub fn show(ui: &mut Ui, q: &mut QueryTab, cx: &mut TabContext<'_>) {
+    let data_tab = q.data_view.is_some();
     egui::Panel::top(Id::new(("q-toolbar", q.id)))
         .frame(
             Frame::new()
-                .fill(color::PANEL)
+                .fill(color::panel())
                 .inner_margin(Margin::symmetric(8, 5)),
         )
         .show_separator_line(false)
-        .show(ui, |ui| toolbar(ui, q, cx));
+        .show(ui, |ui| {
+            if data_tab {
+                data_toolbar(ui, q, cx);
+            } else {
+                toolbar(ui, q, cx);
+            }
+        });
 
     egui::Panel::bottom(Id::new(("q-status", q.id)))
         .exact_size(24.0)
         .frame(
             Frame::new()
-                .fill(color::PANEL)
+                .fill(color::panel())
                 .inner_margin(Margin::symmetric(8, 0)),
         )
         .show(ui, |ui| status_line(ui, q));
 
+    if data_tab {
+        egui::CentralPanel::no_frame().show(ui, |ui| results(ui, q, cx));
+        return;
+    }
     let available = ui.available_height();
     egui::Panel::top(Id::new(("q-editor", q.id)))
         .resizable(true)
         .default_size((available * 0.42).max(120.0))
         .size_range(80.0..=(available - 90.0).max(90.0))
-        .frame(Frame::new().fill(color::EDITOR))
+        .frame(Frame::new().fill(color::editor()))
         .show(ui, |ui| editor(ui, q, cx));
 
     egui::CentralPanel::no_frame().show(ui, |ui| results(ui, q, cx));
@@ -51,7 +62,8 @@ pub fn show(ui: &mut Ui, q: &mut QueryTab, cx: &mut TabContext<'_>) {
 fn toolbar(ui: &mut Ui, q: &mut QueryTab, cx: &mut TabContext<'_>) {
     ui.horizontal(|ui| {
         let running = q.run.running.is_some();
-        let run = Button::new(RichText::new(format!("{}  Run", icon::PLAY)).color(color::SUCCESS));
+        let run =
+            Button::new(RichText::new(format!("{}  Run", icon::PLAY)).color(color::success()));
         if ui
             .add_enabled(!running, run)
             .on_hover_text("Run (Ctrl+Enter). Runs only the selection when text is selected.")
@@ -67,7 +79,8 @@ fn toolbar(ui: &mut Ui, q: &mut QueryTab, cx: &mut TabContext<'_>) {
             }) => capabilities.query_cancellation,
             _ => true,
         };
-        let stop = Button::new(RichText::new(format!("{}  Stop", icon::STOP)).color(color::DANGER));
+        let stop =
+            Button::new(RichText::new(format!("{}  Stop", icon::STOP)).color(color::danger()));
         if ui
             .add_enabled(running && can_cancel, stop)
             .on_hover_text("Cancel the running query")
@@ -141,9 +154,94 @@ fn toolbar(ui: &mut Ui, q: &mut QueryTab, cx: &mut TabContext<'_>) {
                 }
             });
         });
-        ui.add_enabled(false, Button::new(format!("{}  Format", icon::TEXT_INDENT)))
-            .on_disabled_hover_text("SQL formatter — Milestone 3");
     });
+}
+
+/// Toolbar of a data tab: refresh, filter, sort order and row limit of one table or view.
+fn data_toolbar(ui: &mut Ui, q: &mut QueryTab, cx: &mut TabContext<'_>) {
+    let running = q.run.running.is_some();
+    let mut apply = false;
+    ui.horizontal(|ui| {
+        let refresh = Button::new(
+            RichText::new(format!("{}  Refresh", icon::ARROWS_CLOCKWISE)).color(color::success()),
+        );
+        if ui
+            .add_enabled(!running, refresh)
+            .on_hover_text("Load the rows again (Ctrl+Enter)")
+            .clicked()
+        {
+            apply = true;
+        }
+        let stop =
+            Button::new(RichText::new(format!("{}  Stop", icon::STOP)).color(color::danger()));
+        if ui.add_enabled(running, stop).clicked()
+            && let Some(r) = &q.run.running
+        {
+            cx.services.send(Command::Cancel {
+                request_id: r.request_id,
+            });
+        }
+        if let Some(p) = q.profile_id.and_then(|id| cx.profile(id)) {
+            ui.label(
+                RichText::new(format!("{}  {}", p.kind.badge(), p.name)).color(color::text_dim()),
+            );
+            widgets::env_pill(ui, p.environment);
+        }
+        ui.separator();
+        let Some(view) = q.data_view.as_mut() else {
+            return;
+        };
+        ui.label(RichText::new(icon::FUNNEL).color(color::text_dim()))
+            .on_hover_text("Filter (WHERE)");
+        let filter = ui.add(
+            TextEdit::singleline(&mut view.filter)
+                .hint_text("Filter, e.g. country = 'Indonesia'")
+                .desired_width(260.0),
+        );
+        ui.label(RichText::new(icon::SORT_ASCENDING).color(color::text_dim()))
+            .on_hover_text("Sort (ORDER BY)");
+        let order = ui.add(
+            TextEdit::singleline(&mut view.order)
+                .hint_text("Sort, e.g. created_at DESC")
+                .desired_width(180.0),
+        );
+        let entered =
+            |r: &egui::Response| r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+        if entered(&filter) || entered(&order) {
+            apply = true;
+        }
+        let label = |limit: Option<u32>| match limit {
+            Some(n) => format!("{} rows", format_count(u64::from(n))),
+            None => "All rows".to_owned(),
+        };
+        egui::ComboBox::from_id_salt(("data-limit", q.id))
+            .width(110.0)
+            .selected_text(label(view.limit))
+            .show_ui(ui, |ui| {
+                for limit in crate::workspace::DataView::LIMITS {
+                    if ui
+                        .selectable_value(&mut view.limit, limit, label(limit))
+                        .changed()
+                    {
+                        apply = true;
+                    }
+                }
+            });
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            if ui
+                .button(format!("{}  Open as Query", icon::FILE_SQL))
+                .on_hover_text("Continue in a query tab with this SELECT")
+                .clicked()
+                && let Some(view) = q.data_view.take()
+            {
+                q.sql = view.sql();
+                q.run.focus_editor = true;
+            }
+        });
+    });
+    if apply {
+        request_run(q, cx);
+    }
 }
 
 /// Database selector for engines where a session is bound to one database.
@@ -204,6 +302,7 @@ fn editor(ui: &mut Ui, q: &mut QueryTab, cx: &mut TabContext<'_>) {
         .and_then(|id| cx.connections.get(&id))
         .map_or(&[][..], |c| c.objects.as_slice());
 
+    let mut menu_action: Option<EditorAction> = None;
     let mut layouter = |ui: &Ui, buf: &dyn TextBuffer, _wrap_width: f32| {
         let job = widgets::highlight_sql(buf.as_str(), &font);
         ui.ctx().fonts_mut(|f| f.layout_job(job))
@@ -230,7 +329,7 @@ fn editor(ui: &mut Ui, q: &mut QueryTab, cx: &mut TabContext<'_>) {
                         ui.label(
                             RichText::new(numbers)
                                 .font(font.clone())
-                                .color(color::TEXT_FAINT),
+                                .color(color::text_faint()),
                         );
                     },
                 );
@@ -247,6 +346,12 @@ fn editor(ui: &mut Ui, q: &mut QueryTab, cx: &mut TabContext<'_>) {
                     .min_size(Vec2::new(0.0, min_height))
                     .layouter(&mut layouter)
                     .show(ui);
+                let has_selection = output
+                    .cursor_range
+                    .is_some_and(|r| r.primary.index != r.secondary.index);
+                output.response.context_menu(|ui| {
+                    menu_action = editor_menu(ui, has_selection);
+                });
 
                 q.run.cursor = output.cursor_range.map(|range| {
                     widgets::char_range_to_bytes(
@@ -274,6 +379,100 @@ fn editor(ui: &mut Ui, q: &mut QueryTab, cx: &mut TabContext<'_>) {
 
     if let Some(accepted) = q.run.autocomplete.show(ui, Id::new(("autocomplete", q.id))) {
         crate::autocomplete::apply(accepted, &mut q.sql, ui.ctx(), editor_id);
+    }
+    if let Some(action) = menu_action {
+        apply_editor_action(ui.ctx(), editor_id, action, q, cx);
+    }
+}
+
+/// Commands of the editor's context menu.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EditorAction {
+    Cut,
+    Copy,
+    Paste,
+    SelectAll,
+    Run,
+}
+
+fn editor_menu(ui: &mut Ui, has_selection: bool) -> Option<EditorAction> {
+    let mut action = None;
+    let mut item = |ui: &mut Ui, enabled: bool, glyph: &str, label: &str, keys: &str, a| {
+        let button = Button::new(format!("{glyph}  {label}")).shortcut_text(keys);
+        if ui.add_enabled(enabled, button).clicked() {
+            action = Some(a);
+        }
+    };
+    item(
+        ui,
+        has_selection,
+        icon::SCISSORS,
+        "Cut",
+        "Ctrl+X",
+        EditorAction::Cut,
+    );
+    item(
+        ui,
+        has_selection,
+        icon::COPY,
+        "Copy",
+        "Ctrl+C",
+        EditorAction::Copy,
+    );
+    item(
+        ui,
+        true,
+        icon::CLIPBOARD_TEXT,
+        "Paste",
+        "Ctrl+V",
+        EditorAction::Paste,
+    );
+    ui.separator();
+    item(
+        ui,
+        true,
+        icon::SELECTION_ALL,
+        "Select All",
+        "Ctrl+A",
+        EditorAction::SelectAll,
+    );
+    ui.separator();
+    let run = if has_selection {
+        "Run Selection"
+    } else {
+        "Run"
+    };
+    item(ui, true, icon::PLAY, run, "Ctrl+Enter", EditorAction::Run);
+    action
+}
+
+/// Carries out a context-menu command. Clipboard commands go through the platform clipboard
+/// (the backend turns them into the same events as the keyboard shortcuts).
+fn apply_editor_action(
+    ctx: &egui::Context,
+    editor_id: Id,
+    action: EditorAction,
+    q: &mut QueryTab,
+    cx: &mut TabContext<'_>,
+) {
+    ctx.memory_mut(|m| m.request_focus(editor_id));
+    match action {
+        EditorAction::Cut => ctx.send_viewport_cmd(egui::ViewportCommand::RequestCut),
+        EditorAction::Copy => ctx.send_viewport_cmd(egui::ViewportCommand::RequestCopy),
+        EditorAction::Paste => ctx.send_viewport_cmd(egui::ViewportCommand::RequestPaste),
+        EditorAction::SelectAll => {
+            let mut state =
+                egui::text_edit::TextEditState::load(ctx, editor_id).unwrap_or_default();
+            let end = q.sql.chars().count();
+            state
+                .cursor
+                .set_char_range(Some(egui::text::CCursorRange::two(
+                    egui::text::CCursor::new(0),
+                    egui::text::CCursor::new(end),
+                )));
+            state.store(ctx, editor_id);
+        }
+        EditorAction::Run => request_run(q, cx),
     }
 }
 
@@ -380,6 +579,10 @@ pub fn request_run(q: &mut QueryTab, cx: &mut TabContext<'_>) {
         });
         return;
     }
+    if let Some(view) = &q.data_view {
+        q.sql = view.sql();
+        q.run.selection = None;
+    }
     let sql_text = sql_to_run(q);
     let kind = sql::classify(&sql_text);
     if kind == sql::StatementKind::Empty {
@@ -449,7 +652,7 @@ fn results(ui: &mut Ui, q: &mut QueryTab, cx: &mut TabContext<'_>) {
     let has_plan = q.run.plan.is_some() || q.run.plan_request.is_some();
     if has_plan && q.run.running.is_none() {
         Frame::new()
-            .fill(color::PANEL)
+            .fill(color::panel())
             .inner_margin(Margin::symmetric(8, 3))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
@@ -483,7 +686,7 @@ fn results(ui: &mut Ui, q: &mut QueryTab, cx: &mut TabContext<'_>) {
                         },
                         format_duration(started.elapsed())
                     ))
-                    .color(color::TEXT_DIM),
+                    .color(color::text_dim()),
                 );
                 let _ = request_id;
             });
@@ -503,6 +706,7 @@ fn results(ui: &mut Ui, q: &mut QueryTab, cx: &mut TabContext<'_>) {
         running,
         last,
         grid: grid_state,
+        stacked_grids,
         show_messages,
         active_result,
         edits,
@@ -524,7 +728,7 @@ fn results(ui: &mut Ui, q: &mut QueryTab, cx: &mut TabContext<'_>) {
                         r.profile_name,
                         format_duration(r.started.elapsed())
                     ))
-                    .color(color::TEXT_DIM),
+                    .color(color::text_dim()),
                 );
                 if ui.button(format!("{}  Cancel", icon::STOP)).clicked() {
                     cx.services.send(Command::Cancel {
@@ -561,12 +765,25 @@ fn results(ui: &mut Ui, q: &mut QueryTab, cx: &mut TabContext<'_>) {
             if *active_result >= count {
                 *active_result = count.saturating_sub(1);
             }
+            // Several result sets: stacked one above the other (remembered across runs) or as
+            // tabs.
+            let stacked_id = Id::new("results-stacked");
+            let mut stacked = ui
+                .ctx()
+                .data_mut(|d| *d.get_persisted_mut_or_insert_with(stacked_id, || true));
+            let stacked_view = stacked && count > 1;
             Frame::new()
-                .fill(color::PANEL)
+                .fill(color::panel())
                 .inner_margin(Margin::symmetric(8, 3))
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
-                        for i in 0..count {
+                        if stacked_view {
+                            let label = format!("{}  Results ({count})", icon::TABLE);
+                            if ui.selectable_label(!*show_messages, label).clicked() {
+                                *show_messages = false;
+                            }
+                        }
+                        for i in (0..count).filter(|_| !stacked_view) {
                             let label = if count == 1 {
                                 format!("{}  Result", icon::TABLE)
                             } else {
@@ -596,14 +813,41 @@ fn results(ui: &mut Ui, q: &mut QueryTab, cx: &mut TabContext<'_>) {
                             let rs = outcome.results.get(*active_result);
                             ui.add_enabled_ui(rs.is_some(), |ui| {
                                 ui.menu_button(format!("{}  Export", icon::EXPORT), |ui| {
-                                    if let Some(rs) = rs {
+                                    if stacked_view {
+                                        for (i, rs) in outcome.results.iter().enumerate() {
+                                            ui.menu_button(format!("Result {}", i + 1), |ui| {
+                                                export_menu(
+                                                    ui,
+                                                    rs,
+                                                    kind,
+                                                    &export_table,
+                                                    cx.actions,
+                                                );
+                                            });
+                                        }
+                                    } else if let Some(rs) = rs {
                                         export_menu(ui, rs, kind, &export_table, cx.actions);
                                     }
                                 });
                             });
+                            if count > 1
+                                && ui
+                                    .selectable_label(stacked, format!("{}  Stacked", icon::ROWS))
+                                    .on_hover_text(
+                                        "Show all result sets one above the other instead of as tabs",
+                                    )
+                                    .clicked()
+                            {
+                                stacked = !stacked;
+                                ui.ctx().data_mut(|d| d.insert_persisted(stacked_id, stacked));
+                            }
                         });
                     });
                 });
+            if stacked_view && !*show_messages {
+                stacked_results(ui, q.id, &outcome.results, stacked_grids);
+                return;
+            }
             match outcome.results.get(*active_result) {
                 Some(rs) if !*show_messages => {
                     let edit_state = table
@@ -637,6 +881,41 @@ fn results(ui: &mut Ui, q: &mut QueryTab, cx: &mut TabContext<'_>) {
             }
         }
     }
+}
+
+/// All result sets one above the other, each grid with its own scrolling and as tall as its
+/// rows need (up to an equal share of the space), separated by a divider.
+fn stacked_results(
+    ui: &mut Ui,
+    tab_id: u64,
+    results: &[rdbs_core::ResultSet],
+    states: &mut Vec<grid::GridState>,
+) {
+    const DIVIDER: f32 = 4.0;
+    states.resize_with(results.len(), grid::GridState::default);
+    #[allow(clippy::cast_precision_loss)]
+    let share = (ui.available_height() / results.len() as f32 - DIVIDER).max(120.0);
+    ScrollArea::vertical()
+        .id_salt(("stacked-results", tab_id))
+        .auto_shrink(false)
+        .show(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = 0.0;
+            for (i, (rs, state)) in results.iter().zip(states.iter_mut()).enumerate() {
+                if i > 0 {
+                    let (rect, _) = ui.allocate_exact_size(
+                        Vec2::new(ui.available_width(), DIVIDER),
+                        egui::Sense::hover(),
+                    );
+                    ui.painter().rect_filled(rect, 0, color::surface_active());
+                }
+                let height = grid::fitted_height(rs).clamp(grid::empty_height(), share);
+                let width = ui.available_width();
+                ui.allocate_ui(Vec2::new(width, height), |ui| {
+                    ui.set_min_height(height);
+                    grid::show(ui, Id::new(("grid-stacked", tab_id, i)), rs, state, None);
+                });
+            }
+        });
 }
 
 /// Whether the grid of a table tab can be edited.
@@ -688,7 +967,7 @@ fn edit_bar(
     actions: &mut Vec<UiAction>,
 ) {
     Frame::new()
-        .fill(color::EDITOR)
+        .fill(color::editor())
         .inner_margin(Margin::symmetric(8, 4))
         .show(ui, |ui| {
             ui.horizontal(|ui| {
@@ -697,7 +976,7 @@ fn edit_bar(
                         ui.label(
                             RichText::new(format!("{}  {reason}", icon::LOCK))
                                 .size(12.0)
-                                .color(color::TEXT_FAINT),
+                                .color(color::text_faint()),
                         );
                         return;
                     }
@@ -732,7 +1011,7 @@ fn edit_bar(
                     ui.label(
                         RichText::new("Double-click a cell to edit")
                             .size(12.0)
-                            .color(color::TEXT_FAINT),
+                            .color(color::text_faint()),
                     );
                     return;
                 }
@@ -741,7 +1020,7 @@ fn edit_bar(
                 ui.label(
                     RichText::new(format!("{count} pending"))
                         .size(12.0)
-                        .color(color::WARNING),
+                        .color(color::warning()),
                 );
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     ui.add_enabled_ui(!saving, |ui| {
@@ -749,7 +1028,7 @@ fn edit_bar(
                             RichText::new(format!("{}  Save changes", icon::FLOPPY_DISK))
                                 .color(egui::Color32::WHITE),
                         )
-                        .fill(color::ACCENT);
+                        .fill(color::accent());
                         if ui.add(save).clicked() {
                             *edit_error = None;
                             actions.push(UiAction::SaveEdits { tab_id });
@@ -788,7 +1067,7 @@ fn edit_bar(
             if let Some(err) = edit_error {
                 ui.add(
                     egui::Label::new(
-                        RichText::new(format!("{}  {err}", icon::WARNING)).color(color::DANGER),
+                        RichText::new(format!("{}  {err}", icon::WARNING)).color(color::danger()),
                     )
                     .wrap(),
                 );
@@ -822,7 +1101,7 @@ fn export_menu(
     ui.label(
         RichText::new(format!("{rows} rows"))
             .small()
-            .color(color::TEXT_FAINT),
+            .color(color::text_faint()),
     );
     for format in ExportFormat::ALL {
         if ui
@@ -863,7 +1142,10 @@ fn messages(ui: &mut Ui, last: &LastRun) {
             let mut line = |text: String, c| {
                 ui.label(RichText::new(text).font(mono.clone()).color(c));
             };
-            line(format!("{}  Query OK", icon::CHECK_CIRCLE), color::SUCCESS);
+            line(
+                format!("{}  Query OK", icon::CHECK_CIRCLE),
+                color::success(),
+            );
             for (i, rs) in outcome.results.iter().enumerate() {
                 let prefix = if outcome.results.len() > 1 {
                     format!("Result {}: ", i + 1)
@@ -875,14 +1157,14 @@ fn messages(ui: &mut Ui, last: &LastRun) {
                         "{prefix}{} rows returned",
                         format_count(rs.rows.len() as u64)
                     ),
-                    color::TEXT,
+                    color::text(),
                 );
             }
             if let Some(n) = outcome.rows_affected {
-                line(format!("{} rows affected", format_count(n)), color::TEXT);
+                line(format!("{} rows affected", format_count(n)), color::text());
             }
             for m in &outcome.messages {
-                line(m.clone(), color::TEXT_DIM);
+                line(m.clone(), color::text_dim());
             }
             line(
                 format!(
@@ -890,7 +1172,7 @@ fn messages(ui: &mut Ui, last: &LastRun) {
                     format_duration(last.elapsed),
                     last.profile_name
                 ),
-                color::TEXT_FAINT,
+                color::text_faint(),
             );
         });
     });
@@ -899,8 +1181,8 @@ fn messages(ui: &mut Ui, last: &LastRun) {
 fn error_panel(ui: &mut Ui, e: &rdbs_core::DbError) {
     ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
         Frame::new()
-            .fill(color::DANGER.gamma_multiply(0.08))
-            .stroke(Stroke::new(1.0, color::DANGER.gamma_multiply(0.4)))
+            .fill(color::danger().gamma_multiply(0.08))
+            .stroke(Stroke::new(1.0, color::danger().gamma_multiply(0.4)))
             .corner_radius(6)
             .inner_margin(Margin::same(12))
             .outer_margin(Margin::same(10))
@@ -910,13 +1192,13 @@ fn error_panel(ui: &mut Ui, e: &rdbs_core::DbError) {
                     ui.label(
                         RichText::new(format!("{}  Query failed", icon::WARNING))
                             .strong()
-                            .color(color::DANGER),
+                            .color(color::danger()),
                     );
                     if let Some(code) = &e.code {
                         ui.label(
                             RichText::new(format!("code {code}"))
                                 .font(theme::mono())
-                                .color(color::TEXT_DIM),
+                                .color(color::text_dim()),
                         );
                     }
                 });
@@ -926,7 +1208,7 @@ fn error_panel(ui: &mut Ui, e: &rdbs_core::DbError) {
                         .selectable(true),
                 );
                 if let Some(detail) = &e.detail {
-                    ui.label(RichText::new(detail).color(color::TEXT_DIM));
+                    ui.label(RichText::new(detail).color(color::text_dim()));
                 }
             });
     });
@@ -935,9 +1217,9 @@ fn error_panel(ui: &mut Ui, e: &rdbs_core::DbError) {
 fn placeholder(ui: &mut Ui, glyph: &str, title: &str, hint: &str) {
     ui.vertical_centered(|ui| {
         ui.add_space((ui.available_height() * 0.3).max(12.0));
-        ui.label(RichText::new(glyph).size(30.0).color(color::TEXT_FAINT));
-        ui.label(RichText::new(title).color(color::TEXT_DIM));
-        ui.label(RichText::new(hint).small().color(color::TEXT_FAINT));
+        ui.label(RichText::new(glyph).size(30.0).color(color::text_faint()));
+        ui.label(RichText::new(title).color(color::text_dim()));
+        ui.label(RichText::new(hint).small().color(color::text_faint()));
     });
 }
 
@@ -952,7 +1234,7 @@ fn status_line(ui: &mut Ui, q: &QueryTab) {
                     r.profile_name,
                     format_duration(r.started.elapsed())
                 ),
-                color::TEXT_DIM,
+                color::text_dim(),
             ));
         } else if let Some(last) = &q.run.last {
             let (text, c) = match &last.outcome {
@@ -970,12 +1252,12 @@ fn status_line(ui: &mut Ui, q: &QueryTab) {
                     if o.results.len() > 1 {
                         what.push_str(&format!("  ·  {} result sets", o.results.len()));
                     }
-                    (format!("{}  {what}", icon::CHECK_CIRCLE), color::SUCCESS)
+                    (format!("{}  {what}", icon::CHECK_CIRCLE), color::success())
                 }
                 Err(e) if e.kind == DbErrorKind::Cancelled => {
-                    (format!("{}  Cancelled", icon::PROHIBIT), color::WARNING)
+                    (format!("{}  Cancelled", icon::PROHIBIT), color::warning())
                 }
-                Err(_) => (format!("{}  Error", icon::X_CIRCLE), color::DANGER),
+                Err(_) => (format!("{}  Error", icon::X_CIRCLE), color::danger()),
             };
             ui.label(small(text, c));
             ui.label(small(
@@ -984,10 +1266,10 @@ fn status_line(ui: &mut Ui, q: &QueryTab) {
                     format_duration(last.elapsed),
                     last.profile_name
                 ),
-                color::TEXT_DIM,
+                color::text_dim(),
             ));
         } else {
-            ui.label(small("Ready".to_owned(), color::TEXT_DIM));
+            ui.label(small("Ready".to_owned(), color::text_dim()));
         }
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             if let Some(r) = &q.run.selection {
@@ -996,7 +1278,7 @@ fn status_line(ui: &mut Ui, q: &QueryTab) {
                         "Selection: {} chars",
                         q.sql.get(r.clone()).map_or(0, |s| s.chars().count())
                     ),
-                    color::TEXT_DIM,
+                    color::text_dim(),
                 ));
             }
         });

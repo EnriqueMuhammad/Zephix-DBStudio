@@ -9,10 +9,12 @@
 
   Built by scripts/release.ps1:
     dotnet tool run wix build installer/Zephix.wxs -arch x64
+      -ext WixToolset.UI.wixext -d LicenseRtf=<License.rtf>
       -d Version=0.1.0 -d ExePath=<zephix.exe> -d IconPath=apps/zephix/assets/zephix.ico
       -o dist/Zephix-0.1.0-x64.msi
 -->
-<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
   <Package Name="Zephix - Database Management Studio"
            Manufacturer="Enrique Muhammad Ilham"
            Version="$(Version)"
@@ -22,12 +24,13 @@
            Language="1033">
     <SummaryInformation Description="Zephix - Database Management Studio $(Version) installer" />
 
-    <MajorUpgrade DowngradeErrorMessage="A newer version of Zephix is already installed." />
+    <!-- AllowSameVersionUpgrades: a rebuild of the same version replaces the installed copy
+         instead of being installed next to it. -->
+    <MajorUpgrade AllowSameVersionUpgrades="yes" DowngradeErrorMessage="A newer version of Zephix is already installed." />
     <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
 
     <Icon Id="AppIcon" SourceFile="$(IconPath)" />
     <Property Id="ARPPRODUCTICON" Value="AppIcon" />
-    <Property Id="ARPNOMODIFY" Value="1" />
     <Property Id="ARPNOREPAIR" Value="1" />
 
     <StandardDirectory Id="LocalAppDataFolder">
@@ -55,6 +58,23 @@
       <RegistryValue Root="HKCU" Key="Software\Zephix" Name="StartMenuShortcut"
                      Type="integer" Value="1" KeyPath="yes" />
     </Component>
+
+    <!-- Installer dialogs: welcome with the license, progress, and a finish page that offers to
+         start the app (Repair / Remove when this version is already installed). Silent and
+         /passive runs (deployment, the in-app updater) show no dialogs and do not launch it. -->
+    <WixVariable Id="WixUILicenseRtf" Value="$(LicenseRtf)" />
+    <!-- Pictures in the app's colors (scripts/make-installer-art.py) instead of the WiX defaults. -->
+    <WixVariable Id="WixUIDialogBmp" Value="$(sys.SOURCEFILEDIR)dialog.bmp" />
+    <WixVariable Id="WixUIBannerBmp" Value="$(sys.SOURCEFILEDIR)banner.bmp" />
+    <SetProperty Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT" Value="Launch Zephix"
+                 Before="CostFinalize" Sequence="ui" Condition="NOT Installed" />
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOX" Value="1" />
+    <ui:WixUI Id="WixUI_Minimal" />
+    <UI>
+      <Publish Dialog="ExitDialog" Control="Finish" Event="DoAction" Value="LaunchApplication"
+               Condition="WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 AND NOT Installed" />
+    </UI>
+    <CustomAction Id="LaunchApplication" FileRef="ZephixExe" ExeCommand="" Return="asyncNoWait" />
 
     <Feature Id="Main" Title="Zephix">
       <ComponentRef Id="MainExecutable" />

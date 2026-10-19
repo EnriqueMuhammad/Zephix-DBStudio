@@ -234,7 +234,7 @@ impl Transfer {
             }
         });
         if self.rt.tables.is_empty() {
-            ui.label(RichText::new("Choose a source and press Load.").color(color::TEXT_DIM));
+            ui.label(RichText::new("Choose a source and press Load.").color(color::text_dim()));
             return;
         }
         ui.add(egui::TextEdit::singleline(&mut self.rt.filter).hint_text("filter…"));
@@ -313,7 +313,7 @@ impl Transfer {
                 .add_enabled(
                     ready && !running,
                     Button::new(
-                        RichText::new(format!("{}  Start", icon::PLAY)).color(color::SUCCESS),
+                        RichText::new(format!("{}  Start", icon::PLAY)).color(color::success()),
                     ),
                 )
                 .on_disabled_hover_text(
@@ -325,7 +325,7 @@ impl Transfer {
             }
             if running
                 && ui
-                    .button(RichText::new(format!("{}  Cancel", icon::STOP)).color(color::DANGER))
+                    .button(RichText::new(format!("{}  Cancel", icon::STOP)).color(color::danger()))
                     .clicked()
                 && let Some(id) = self.rt.job
             {
@@ -357,11 +357,11 @@ impl Transfer {
                         ""
                     }
                 ))
-                .color(color::WARNING),
+                .color(color::warning()),
             );
             ui.horizontal(|ui| {
                 if ui
-                    .button(RichText::new("Start transfer").color(color::DANGER))
+                    .button(RichText::new("Start transfer").color(color::danger()))
                     .clicked()
                 {
                     self.rt.confirm = false;
@@ -385,7 +385,7 @@ impl Transfer {
                 .stick_to_bottom(true)
                 .show(ui, |ui| {
                     for line in &self.rt.log {
-                        ui.label(RichText::new(line).small().color(color::TEXT_DIM));
+                        ui.label(RichText::new(line).small().color(color::text_dim()));
                     }
                 });
         }
@@ -393,7 +393,7 @@ impl Transfer {
             Some(Ok(summary)) => {
                 ui.label(
                     RichText::new(format!("{}  {summary}", icon::CHECK_CIRCLE))
-                        .color(color::SUCCESS),
+                        .color(color::success()),
                 );
             }
             Some(Err(e)) => error_box(ui, e),

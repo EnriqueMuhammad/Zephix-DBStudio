@@ -45,10 +45,10 @@ struct Runtime {
 
 fn status_icon(status: DiffStatus) -> (&'static str, egui::Color32) {
     match status {
-        DiffStatus::Added => (icon::PLUS_CIRCLE, color::SUCCESS),
-        DiffStatus::Removed => (icon::MINUS_CIRCLE, color::DANGER),
-        DiffStatus::Changed => (icon::PENCIL_CIRCLE, color::WARNING),
-        DiffStatus::Identical => (icon::CHECK_CIRCLE, color::TEXT_FAINT),
+        DiffStatus::Added => (icon::PLUS_CIRCLE, color::success()),
+        DiffStatus::Removed => (icon::MINUS_CIRCLE, color::danger()),
+        DiffStatus::Changed => (icon::PENCIL_CIRCLE, color::warning()),
+        DiffStatus::Identical => (icon::CHECK_CIRCLE, color::text_faint()),
     }
 }
 
@@ -216,7 +216,8 @@ impl Diff {
                 }
                 if let Some(n) = &self.rt.notice {
                     ui.label(
-                        RichText::new(format!("{}  {n}", icon::CHECK_CIRCLE)).color(color::SUCCESS),
+                        RichText::new(format!("{}  {n}", icon::CHECK_CIRCLE))
+                            .color(color::success()),
                     );
                 }
                 if self.rt.diffs.is_empty() {
@@ -240,7 +241,7 @@ impl Diff {
                 counts(DiffStatus::Removed),
                 counts(DiffStatus::Identical)
             ))
-            .color(color::TEXT_DIM),
+            .color(color::text_dim()),
         );
         let script_lines = self.script();
         // Room for the action bar (and the confirmation row) below the list and details: the
@@ -288,7 +289,9 @@ impl Diff {
                                         self.rt.focus = Some(d.name.clone());
                                     }
                                     if d.error.is_some() {
-                                        ui.label(RichText::new(icon::WARNING).color(color::DANGER));
+                                        ui.label(
+                                            RichText::new(icon::WARNING).color(color::danger()),
+                                        );
                                     }
                                 });
                             }
@@ -331,7 +334,7 @@ impl Diff {
                         ] {
                             ui.vertical(|ui| {
                                 ui.set_width(half);
-                                ui.label(RichText::new(title).color(color::TEXT_DIM));
+                                ui.label(RichText::new(title).color(color::text_dim()));
                                 let mut shown = text.as_str();
                                 ScrollArea::both()
                                     .id_salt(("diff-ddl", title))
@@ -346,7 +349,7 @@ impl Diff {
                             });
                         }
                     });
-                    ui.label(RichText::new("Statements for this table").color(color::TEXT_DIM));
+                    ui.label(RichText::new("Statements for this table").color(color::text_dim()));
                     let mut own = script(&[d.statements.clone(), d.deferred.clone()].concat());
                     if own.is_empty() {
                         own = "-- none".into();
@@ -403,7 +406,7 @@ impl Diff {
                     !script_lines.is_empty() && !busy,
                     Button::new(
                         RichText::new(format!("{}  Apply to Target", icon::PLAY))
-                            .color(color::WARNING),
+                            .color(color::warning()),
                     ),
                 )
                 .clicked()
@@ -427,10 +430,10 @@ impl Diff {
                         icon::WARNING,
                         script_lines.len()
                     ))
-                    .color(color::WARNING),
+                    .color(color::warning()),
                 );
                 if ui
-                    .button(RichText::new("Apply").color(color::DANGER))
+                    .button(RichText::new("Apply").color(color::danger()))
                     .clicked()
                     && let Some(t) = self.target.clone()
                 {

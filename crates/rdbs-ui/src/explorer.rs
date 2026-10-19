@@ -64,7 +64,7 @@ pub fn show(ui: &mut Ui, state: &mut ExplorerState, cx: &mut ExplorerContext<'_>
             RichText::new("CONNECTIONS")
                 .size(11.0)
                 .strong()
-                .color(color::TEXT_DIM),
+                .color(color::text_dim()),
         );
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if ui
@@ -108,7 +108,7 @@ pub fn show(ui: &mut Ui, state: &mut ExplorerState, cx: &mut ExplorerContext<'_>
             if cx.profiles.is_empty() {
                 ui.add_space(20.0);
                 ui.vertical_centered(|ui| {
-                    ui.label(RichText::new("No connections yet").color(color::TEXT_DIM));
+                    ui.label(RichText::new("No connections yet").color(color::text_dim()));
                     if ui
                         .button(format!("{}  New connection", icon::PLUS))
                         .clicked()
@@ -147,6 +147,8 @@ fn profile_node(
         expandable: true,
         open,
         selected: state.selected.as_deref() == Some(key.as_str()),
+        // Reordering a filtered list would be confusing.
+        draggable: needle.is_empty(),
     };
     let (response, toggled) = row.show(ui, |ui, rect| {
         let badge = Rect::from_center_size(
@@ -156,9 +158,9 @@ fn profile_node(
         widgets::paint_kind_badge(ui, badge, profile.kind);
         let mut x = badge.right() + 7.0;
         let text_color = if connected {
-            color::TEXT
+            color::text()
         } else {
-            color::TEXT_DIM
+            color::text_dim()
         };
         let galley = ui.painter().layout_no_wrap(
             profile.name.clone(),
@@ -193,7 +195,7 @@ fn profile_node(
                 egui::Spinner::new().size(12.0).paint_at(ui, r);
             }
             Some(ConnStatus::Connected { .. }) => {
-                ui.painter().circle_filled(right, 3.5, color::SUCCESS);
+                ui.painter().circle_filled(right, 3.5, color::success());
             }
             Some(ConnStatus::Failed(_)) => {
                 ui.painter().text(
@@ -201,7 +203,7 @@ fn profile_node(
                     Align2::CENTER_CENTER,
                     icon::WARNING,
                     FontId::proportional(13.0),
-                    color::DANGER,
+                    color::danger(),
                 );
             }
             _ => {}
@@ -215,11 +217,45 @@ fn profile_node(
         _ => String::new(),
     };
     let response = response.on_hover_text(format!(
-        "{} · {}\n{}{server}",
+        "{} · {}\n{}{server}\nDrag to reorder",
         profile.kind,
         profile.environment.label(),
         profile.endpoint()
     ));
+
+    // Drag a connection onto another one to move it above or below it.
+    if needle.is_empty() {
+        response.dnd_set_drag_payload(profile.id);
+        if response.dragged() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+        }
+        let below = ui
+            .input(|i| i.pointer.latest_pos())
+            .is_some_and(|p| p.y > response.rect.center().y);
+        if let Some(dragged) = response.dnd_hover_payload::<ProfileId>()
+            && *dragged != profile.id
+        {
+            let y = if below {
+                response.rect.bottom()
+            } else {
+                response.rect.top()
+            };
+            ui.painter().hline(
+                response.rect.x_range(),
+                y,
+                egui::Stroke::new(2.0, color::accent()),
+            );
+        }
+        if let Some(dragged) = response.dnd_release_payload::<ProfileId>()
+            && *dragged != profile.id
+        {
+            cx.actions.push(UiAction::MoveConnection {
+                id: *dragged,
+                target: profile.id,
+                below,
+            });
+        }
+    }
 
     if response.clicked() {
         state.selected = Some(key.clone());
@@ -254,9 +290,9 @@ fn profile_node(
         return;
     }
     match status {
-        Some(ConnStatus::Connecting) => hint_row(ui, 1, "Connecting…", color::TEXT_DIM),
+        Some(ConnStatus::Connecting) => hint_row(ui, 1, "Connecting…", color::text_dim()),
         Some(ConnStatus::Failed(e)) => {
-            hint_row(ui, 1, &e.to_string(), color::DANGER);
+            hint_row(ui, 1, &e.to_string(), color::danger());
         }
         Some(ConnStatus::Connected { .. }) => {
             let path = PathCtx {
@@ -266,14 +302,19 @@ fn profile_node(
                 schema: None,
             };
             if objects.is_empty() {
-                hint_row(ui, 1, "No objects loaded (F5 refreshes)", color::TEXT_FAINT);
+                hint_row(
+                    ui,
+                    1,
+                    "No objects loaded (F5 refreshes)",
+                    color::text_faint(),
+                );
             }
             for obj in objects {
                 let loading = conn.map(|c| &c.loading_databases);
                 object_node(ui, state, cx.actions, obj, &key, 1, &path, needle, loading);
             }
         }
-        _ => hint_row(ui, 1, "Not connected", color::TEXT_FAINT),
+        _ => hint_row(ui, 1, "Not connected", color::text_faint()),
     }
 }
 
@@ -330,7 +371,9 @@ fn profile_menu(
         actions.push(UiAction::DuplicateConnection(profile.id));
     }
     if ui
-        .button(RichText::new(format!("{}  Delete Connection…", icon::TRASH)).color(color::DANGER))
+        .button(
+            RichText::new(format!("{}  Delete Connection…", icon::TRASH)).color(color::danger()),
+        )
         .clicked()
     {
         actions.push(UiAction::DeleteConnection(profile.id));
@@ -376,6 +419,7 @@ fn object_node(
         expandable,
         open,
         selected: state.selected.as_deref() == Some(key.as_str()),
+        draggable: false,
     };
     let (response, toggled) = row.show(ui, |ui, rect| {
         let painter = ui.painter();
@@ -387,17 +431,17 @@ fn object_node(
             glyph_color,
         );
         let galley =
-            painter.layout_no_wrap(obj.name.clone(), FontId::proportional(13.0), color::TEXT);
+            painter.layout_no_wrap(obj.name.clone(), FontId::proportional(13.0), color::text());
         let pos = egui::pos2(rect.left() + 20.0, rect.center().y - galley.size().y / 2.0);
         let name_width = galley.size().x;
-        painter.galley(pos, galley, color::TEXT);
+        painter.galley(pos, galley, color::text());
         if let Some(detail) = &obj.detail {
             painter.text(
                 egui::pos2(pos.x + name_width + 8.0, rect.center().y),
                 Align2::LEFT_CENTER,
                 detail,
                 FontId::proportional(11.0),
-                color::TEXT_FAINT,
+                color::text_faint(),
             );
         }
     });
@@ -424,6 +468,8 @@ fn object_node(
             | ObjectKind::Procedure
     );
     let ddl_ref = has_ddl.then(|| reference.clone());
+    let routine_ref =
+        matches!(obj.kind, ObjectKind::Function | ObjectKind::Procedure).then(|| reference.clone());
     let object_ref = obj.kind.is_queryable().then_some(reference);
 
     if response.clicked() || response.secondary_clicked() {
@@ -431,7 +477,9 @@ fn object_node(
         state.selected_profile = Some(path.profile_id);
         state.selected_object = object_ref.clone();
     }
-    if toggled || (expandable && response.double_clicked()) {
+    // Double-click opens tables, views and routines; their columns expand with the caret.
+    let opens = object_ref.is_some() || routine_ref.is_some();
+    if toggled || (expandable && !opens && response.double_clicked()) {
         if !state.expanded.remove(&key) {
             state.expanded.insert(key.clone());
             if lazy && !is_loading {
@@ -441,10 +489,14 @@ fn object_node(
                 });
             }
         }
-    } else if response.double_clicked()
-        && let Some(r) = &object_ref
-    {
-        actions.push(UiAction::OpenObject(r.clone()));
+    } else if response.double_clicked() {
+        if let Some(r) = &object_ref {
+            actions.push(UiAction::OpenObject(r.clone()));
+        } else if let Some(r) = &routine_ref
+            && path.kind.is_sql()
+        {
+            actions.push(UiAction::EditRoutine(r.clone()));
+        }
     }
 
     response.context_menu(|ui| {
@@ -453,6 +505,7 @@ fn object_node(
             obj,
             object_ref.as_ref(),
             ddl_ref.as_ref(),
+            routine_ref.as_ref(),
             path,
             actions,
         );
@@ -460,7 +513,7 @@ fn object_node(
 
     if open {
         if is_loading {
-            hint_row(ui, depth + 1, "Loading…", color::TEXT_DIM);
+            hint_row(ui, depth + 1, "Loading…", color::text_dim());
         }
         for child in &obj.children {
             object_node(
@@ -478,14 +531,39 @@ fn object_node(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn object_menu(
     ui: &mut Ui,
     obj: &DbObject,
     object_ref: Option<&ObjectRef>,
     ddl_ref: Option<&ObjectRef>,
+    routine_ref: Option<&ObjectRef>,
     path: &PathCtx,
     actions: &mut Vec<UiAction>,
 ) {
+    if let Some(r) = routine_ref
+        && path.kind.is_sql()
+    {
+        let what = if obj.kind == ObjectKind::Function {
+            "Function"
+        } else {
+            "Procedure"
+        };
+        if ui
+            .button(format!("{}  Edit {what}", icon::PENCIL_SIMPLE))
+            .on_hover_text("Open the definition as a script; running it saves your changes")
+            .clicked()
+        {
+            actions.push(UiAction::EditRoutine(r.clone()));
+        }
+        if ui
+            .button(format!("{}  Execute {what}…", icon::PLAY))
+            .on_hover_text("Enter the parameters and run it")
+            .clicked()
+        {
+            actions.push(UiAction::ExecuteRoutine(r.clone()));
+        }
+    }
     if let Some(r) = ddl_ref
         && ui.button(format!("{}  Show DDL", icon::CODE)).clicked()
     {
@@ -494,11 +572,23 @@ fn object_menu(
     if let Some(r) = object_ref {
         if ui
             .button(format!("{}  Open {}", icon::TABLE, kind_label(obj.kind)))
+            .on_hover_text("Rows in a data tab (double-click does the same)")
             .clicked()
         {
             actions.push(UiAction::OpenObject(r.clone()));
         }
         let sql = path.kind.is_sql();
+        if sql
+            && ui
+                .button(format!("{}  Select Top 100 Rows", icon::LIST_NUMBERS))
+                .on_hover_text("A query tab with the SELECT, already run")
+                .clicked()
+        {
+            actions.push(UiAction::SelectTop {
+                obj: r.clone(),
+                rows: 100,
+            });
+        }
         if sql
             && obj.kind == ObjectKind::Table
             && ui
@@ -630,6 +720,12 @@ fn kind_label(kind: ObjectKind) -> &'static str {
 }
 
 fn object_icon(obj: &DbObject) -> (&'static str, Color32) {
+    let (glyph, c) = object_icon_dark(obj);
+    (glyph, crate::theme::icon_tint(c))
+}
+
+/// Icon and its colour on the dark theme.
+fn object_icon_dark(obj: &DbObject) -> (&'static str, Color32) {
     match obj.kind {
         ObjectKind::Database => (icon::DATABASE, Color32::from_rgb(0xE5, 0xB5, 0x4A)),
         ObjectKind::Schema => (icon::SQUARES_FOUR, Color32::from_rgb(0xB3, 0x8B, 0xF2)),
@@ -639,13 +735,13 @@ fn object_icon(obj: &DbObject) -> (&'static str, Color32) {
         ObjectKind::MaterializedView => (icon::STACK, Color32::from_rgb(0x4F, 0xC1, 0xB0)),
         ObjectKind::Function => (icon::FUNCTION, Color32::from_rgb(0xF2, 0x8B, 0xC0)),
         ObjectKind::Procedure => (icon::LIGHTNING, Color32::from_rgb(0xF2, 0xA1, 0x5A)),
-        ObjectKind::Index => (icon::LIST_BULLETS, color::TEXT_DIM),
+        ObjectKind::Index => (icon::LIST_BULLETS, color::text_dim()),
         ObjectKind::Column => {
             let is_pk = obj.detail.as_deref().is_some_and(|d| d.contains("PK"));
             if is_pk {
                 (icon::KEY, Color32::from_rgb(0xE5, 0xB5, 0x4A))
             } else {
-                (icon::COLUMNS, color::TEXT_FAINT)
+                (icon::COLUMNS, color::text_faint())
             }
         }
     }
@@ -669,22 +765,29 @@ struct TreeRow {
     expandable: bool,
     open: bool,
     selected: bool,
+    /// The row can be dragged (connections, to reorder them).
+    draggable: bool,
 }
 
 impl TreeRow {
     /// Paints the row and calls `content` with the area right of the caret.
     /// Returns the row response and whether the caret was clicked.
     fn show(self, ui: &mut Ui, content: impl FnOnce(&Ui, Rect)) -> (Response, bool) {
+        let sense = if self.draggable {
+            Sense::click_and_drag()
+        } else {
+            Sense::click()
+        };
         let (rect, response) =
-            ui.allocate_exact_size(Vec2::new(ui.available_width(), ROW_HEIGHT), Sense::click());
+            ui.allocate_exact_size(Vec2::new(ui.available_width(), ROW_HEIGHT), sense);
         let painter = ui.painter();
         if self.selected {
-            painter.rect_filled(rect, CornerRadius::same(3), color::SELECTION);
+            painter.rect_filled(rect, CornerRadius::same(3), color::selection());
         } else if response.hovered() {
             painter.rect_filled(
                 rect,
                 CornerRadius::same(3),
-                color::SURFACE.gamma_multiply(0.7),
+                color::surface().gamma_multiply(0.7),
             );
         }
 
@@ -703,7 +806,7 @@ impl TreeRow {
                     icon::CARET_RIGHT
                 },
                 FontId::proportional(11.0),
-                color::TEXT_DIM,
+                color::text_dim(),
             );
         }
         // `interact_pointer_pos` can be empty on the release frame (press and release in

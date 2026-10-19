@@ -1,0 +1,63 @@
+# Changelog
+
+All notable changes to Zephix. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
+and the project uses [Semantic Versioning](https://semver.org/).
+
+## 0.1.2 - 2026-10-19
+
+### Added
+
+- Light theme: View > Light Theme or the sun/moon button at the right of the menu bar; the
+  choice is remembered.
+- Double-clicking a table or view opens its rows in a data tab: a grid without an SQL editor,
+  with a filter (`WHERE`), a sort order (`ORDER BY`), a row limit (100 / 1,000 / 10,000 / all),
+  Refresh and "Open as Query". Grid editing works as in query tabs. The columns of a table
+  still expand with the arrow next to it.
+- **Select Top 100 Rows** on tables and views: a query tab with the engine's `SELECT`
+  (`TOP`, `LIMIT` or `FETCH FIRST`), already run.
+- Functions and procedures can be edited: **Edit** (or a double-click) opens the definition as a
+  script that saves the changes when run (`CREATE OR ALTER` on SQL Server, `CREATE OR REPLACE`
+  on PostgreSQL, MariaDB and Oracle, `DROP` + `CREATE` on MySQL).
+- Functions and procedures can be executed: **Execute…** asks for the parameter values (or
+  `NULL`) and runs the matching call (`EXEC`, `CALL`, `SELECT`, an anonymous block on Oracle),
+  showing output parameters as a result. Routines without parameters run right away.
+- The installer shows a welcome page with the license, progress, and a finish page with a
+  "Launch Zephix" option; running it again offers Repair and Remove. Its pictures use the
+  colors and icon of Zephix.
+- Demo mode (`--demo`) has definitions and parameters for its sample tables, views and routines.
+- Right-click menu in the SQL editor: Cut, Copy, Paste, Select All and Run (or Run Selection).
+- Rows can be selected in result grids: click a row number, Ctrl-click to add, Shift-click for a
+  range, the blank top-left cell or Ctrl+A for all. **Copy** (Ctrl+C) copies the rows, **Copy with headers**
+  (Ctrl+Shift+C) adds the column names; both paste as a table into spreadsheets.
+- Several result sets can be shown **stacked**, one grid above the other (the default, toggle
+  "Stacked"), instead of as tabs; Export offers each result set.
+- Connections in the explorer can be reordered by dragging them; the order is saved.
+
+### Changed
+
+- Result grids look like a spreadsheet: cell borders, a one-line header (the column type shows
+  on hover), columns sized to their content, and a compact row-number column. Stacked result
+  sets are as tall as their rows and separated by a divider.
+- Zephix opens on the home page (Welcome tab), also when it was closed last time; the other
+  tabs of the last session are restored behind it.
+- A window that does not fit the screen (small or highly scaled displays, or a size remembered
+  from a larger monitor) opens maximized, and the restore button gives it a size that fits.
+- Installing a newer build of the same version replaces the installed copy instead of adding a
+  second one.
+
+### Fixed
+
+- The status bar showed only the end of multi-line messages (such as the SQL Server version);
+  it now shows one line and the full text on hover.
+
+### Removed
+
+- The disabled "Format" button of query tabs and the inactive Truncate / Drop menu items.
+
+## 0.1.0 - 2026-10-18
+
+First release: PostgreSQL, MySQL, MariaDB, SQL Server, SQLite, Oracle, MongoDB and Redis;
+connection profiles with SSH tunnels and keychain passwords; query editor with autocomplete,
+history and explain plans; result grid with editing and export; table designer, import,
+schema diff, ER diagram, data transfer and sync, query builder and scheduled backups;
+per-user MSI installer.

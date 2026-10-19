@@ -184,6 +184,36 @@ impl ProfileStore {
         Ok(())
     }
 
+    /// Stores the display order: `ids` first, in that order (profiles not listed keep their
+    /// relative order after them).
+    pub fn reorder(&mut self, ids: &[ProfileId]) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        {
+            let mut stmt =
+                tx.prepare("UPDATE connection_profiles SET sort_order = ?1 WHERE id = ?2")?;
+            for (i, id) in ids.iter().enumerate() {
+                stmt.execute(params![
+                    i64::try_from(i).unwrap_or(i64::MAX),
+                    id.to_string()
+                ])?;
+            }
+            // Anything not listed goes after, in its previous order.
+            let listed: Vec<String> = ids.iter().map(|id| format!("'{id}'")).collect();
+            if !listed.is_empty() {
+                tx.execute(
+                    &format!(
+                        "UPDATE connection_profiles SET sort_order = sort_order + {}                          WHERE id NOT IN ({})",
+                        ids.len(),
+                        listed.join(",")
+                    ),
+                    [],
+                )?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     /// Deletes a profile; returns whether it existed.
     pub fn delete(&self, id: ProfileId) -> Result<bool> {
         let n = self.conn.execute(
@@ -234,6 +264,22 @@ mod tests {
         assert_eq!(store.schedules().unwrap(), vec![s.clone()]);
         store.delete_schedule("s1").unwrap();
         assert!(store.schedules().unwrap().is_empty());
+    }
+
+    #[test]
+    fn reorder_persists_display_order() {
+        let mut store = ProfileStore::open_in_memory().unwrap();
+        let (a, b, c) = (profile("a"), profile("b"), profile("c"));
+        for p in [&a, &b, &c] {
+            store.upsert(p).unwrap();
+        }
+        store.reorder(&[c.id, a.id, b.id]).unwrap();
+        let names: Vec<String> = store.list().unwrap().into_iter().map(|p| p.name).collect();
+        assert_eq!(names, ["c", "a", "b"]);
+        // A new profile is still appended at the end.
+        store.upsert(&profile("d")).unwrap();
+        let names: Vec<String> = store.list().unwrap().into_iter().map(|p| p.name).collect();
+        assert_eq!(names, ["c", "a", "b", "d"]);
     }
 
     #[test]

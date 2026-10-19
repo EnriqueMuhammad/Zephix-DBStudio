@@ -122,14 +122,14 @@ pub fn show(ui: &mut Ui, id: &str, scope: &mut Option<Scope>, cx: &mut TabContex
             });
         let Some(s) = scope.as_mut() else { return };
         let Some(profile) = cx.profile(s.profile_id) else {
-            ui.label(RichText::new("connection deleted").color(color::DANGER));
+            ui.label(RichText::new("connection deleted").color(color::danger()));
             return;
         };
         let kind = profile.kind;
         let conn = cx.connections.get(&s.profile_id);
         ui.horizontal(|ui| {
             if kind != DatabaseKind::Sqlite {
-                ui.label(RichText::new("Database").color(color::TEXT_DIM));
+                ui.label(RichText::new("Database").color(color::text_dim()));
                 let mut db = s.database.clone().unwrap_or_default();
                 if text_with_choices(
                     ui,
@@ -143,7 +143,7 @@ pub fn show(ui: &mut Ui, id: &str, scope: &mut Option<Scope>, cx: &mut TabContex
                 }
             }
             if kind.has_schemas() {
-                ui.label(RichText::new("Schema").color(color::TEXT_DIM));
+                ui.label(RichText::new("Schema").color(color::text_dim()));
                 let mut schema = s.schema.clone().unwrap_or_default();
                 let known = schemas(conn, s.database.as_deref());
                 if text_with_choices(ui, &format!("{id}-schema"), &mut schema, &known, "all") {

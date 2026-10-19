@@ -227,6 +227,15 @@ pub trait DatabaseAdapter: Send {
         })
     }
 
+    /// Parameters of a function or procedure, to execute it.
+    fn routine_signature<'a>(
+        &'a mut self,
+        object: &'a ObjectPath,
+    ) -> BoxFuture<'a, Result<crate::routine::RoutineSignature, DbError>> {
+        let _ = object;
+        Box::pin(async { Err(unsupported("routine parameters")) })
+    }
+
     /// Structured definitions of the base tables of the session's database, optionally only
     /// those of one schema. Tables are ordered by schema, then name.
     fn describe_schema<'a>(

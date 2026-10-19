@@ -84,18 +84,18 @@ impl Widget for ToolbarButton<'_> {
         let painter = ui.painter();
         if self.enabled && response.hovered() {
             let fill = if response.is_pointer_button_down_on() {
-                color::SURFACE_ACTIVE
+                color::surface_active()
             } else {
-                color::SURFACE_HOVER
+                color::surface_hover()
             };
             painter.rect_filled(rect, CornerRadius::same(5), fill);
         }
         let fg = if self.enabled {
-            color::TEXT
+            color::text()
         } else {
-            color::TEXT_FAINT
+            color::text_faint()
         };
-        let icon_color = if self.enabled { color::ACCENT } else { fg };
+        let icon_color = if self.enabled { color::accent() } else { fg };
         painter.text(
             rect.center_top() + Vec2::new(0.0, 15.0),
             Align2::CENTER_CENTER,

@@ -30,24 +30,24 @@ pub fn show(ui: &mut Ui, cx: &mut TabContext<'_>) {
                 ui.label(
                     RichText::new(icon::DATABASE)
                         .size(44.0)
-                        .color(color::ACCENT),
+                        .color(color::accent()),
                 );
                 ui.label(RichText::new(rdbs_core::brand::APP_NAME).size(26.0).strong());
                 ui.label(
                     RichText::new(rdbs_core::brand::APP_TAGLINE)
                         .size(15.0)
-                        .color(color::TEXT),
+                        .color(color::text()),
                 );
                 ui.label(
                     RichText::new(
                         "PostgreSQL · MySQL / MariaDB · SQL Server · SQLite · Oracle · MongoDB · Redis",
                     )
-                    .color(color::TEXT_DIM),
+                    .color(color::text_dim()),
                 );
                 ui.label(
                     RichText::new(format!("Created by {}", rdbs_core::brand::APP_AUTHOR))
                         .small()
-                        .color(color::TEXT_FAINT),
+                        .color(color::text_faint()),
                 );
                 ui.add_space(18.0);
                 ui.horizontal(|ui| {
@@ -92,7 +92,7 @@ pub fn show(ui: &mut Ui, cx: &mut TabContext<'_>) {
                                 RichText::new("CONNECTIONS")
                                     .size(11.0)
                                     .strong()
-                                    .color(color::TEXT_DIM),
+                                    .color(color::text_dim()),
                             );
                             ui.add_space(4.0);
                             for p in cx.profiles {
@@ -117,12 +117,12 @@ pub fn show(ui: &mut Ui, cx: &mut TabContext<'_>) {
                                 RichText::new("KEYBOARD")
                                     .size(11.0)
                                     .strong()
-                                    .color(color::TEXT_DIM),
+                                    .color(color::text_dim()),
                             );
                             ui.add_space(4.0);
                             Grid::new("shortcuts").spacing([16.0, 6.0]).show(ui, |ui| {
                                 for (keys, what) in SHORTCUTS {
-                                    ui.label(RichText::new(*keys).monospace().color(color::ACCENT));
+                                    ui.label(RichText::new(*keys).monospace().color(color::accent()));
                                     ui.label(*what);
                                     ui.end_row();
                                 }

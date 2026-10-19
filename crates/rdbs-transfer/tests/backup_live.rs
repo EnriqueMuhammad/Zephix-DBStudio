@@ -95,6 +95,14 @@ fn it() -> bool {
     std::env::var("RDBS_IT").as_deref() == Ok("1")
 }
 
+/// PostgreSQL test port (`RDBS_PG_PORT`, default as in `dev/docker-compose.yml`).
+fn pg_port() -> u16 {
+    std::env::var("RDBS_PG_PORT")
+        .ok()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(55432)
+}
+
 fn profile(kind: DatabaseKind, port: u16, user: &str, database: &str) -> ConnectionProfile {
     let mut p = ConnectionProfile::new(kind);
     p.host = "127.0.0.1".into();
@@ -130,7 +138,7 @@ async fn postgres_backup_restores() {
     }
     let mut pg = PostgresFactory
         .connect(
-            &profile(DatabaseKind::PostgreSql, 55432, "postgres", "rdbs_test"),
+            &profile(DatabaseKind::PostgreSql, pg_port(), "postgres", "rdbs_test"),
             Some("rdbs_test_pw"),
         )
         .await

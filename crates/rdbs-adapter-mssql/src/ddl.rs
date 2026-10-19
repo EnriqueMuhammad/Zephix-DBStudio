@@ -175,3 +175,59 @@ async fn table_ddl(client: &mut MssqlClient, two_part: &str, id: &str) -> Result
     }
     Ok(out)
 }
+
+/// Parameters of a function or procedure in the current database.
+pub async fn routine_signature(
+    client: &mut MssqlClient,
+    object: &ObjectPath,
+) -> Result<rdbs_core::routine::RoutineSignature, DbError> {
+    use rdbs_core::routine::{ParamMode, RoutineParam, RoutineSignature};
+    let schema = object.schema.as_deref().unwrap_or("dbo");
+    let two_part = qualified_name(MS, None, Some(schema), &object.name);
+    let id = format!("OBJECT_ID({})", lit(&two_part));
+    let kind = text_rows(
+        client,
+        &format!("SELECT RTRIM(type) FROM sys.objects WHERE object_id = {id}"),
+    )
+    .await?;
+    let Some(kind) = kind.first().map(|r| col(r, 0)) else {
+        return Err(DbError::new(
+            DbErrorKind::Query,
+            format!("{} was not found", object.name),
+        ));
+    };
+    // Parameter 0 of a scalar function is its return value.
+    let rows = text_rows(
+        client,
+        &format!(
+            "SELECT p.name, t.name, CAST(p.max_length AS nvarchar(10)), \
+                    CAST(p.precision AS nvarchar(5)), CAST(p.scale AS nvarchar(5)), \
+                    CAST(p.is_output AS nvarchar(1)) \
+             FROM sys.parameters p JOIN sys.types t ON t.user_type_id = p.user_type_id \
+             WHERE p.object_id = {id} AND p.parameter_id > 0 ORDER BY p.parameter_id"
+        ),
+    )
+    .await?;
+    let params = rows
+        .iter()
+        .map(|r| RoutineParam {
+            name: col(r, 0),
+            data_type: column_type(
+                &col(r, 1),
+                col(r, 2).parse().unwrap_or(0),
+                &col(r, 3),
+                &col(r, 4),
+            ),
+            mode: if col(r, 5) == "1" {
+                ParamMode::Out
+            } else {
+                ParamMode::In
+            },
+        })
+        .collect();
+    Ok(RoutineSignature {
+        params,
+        // Inline and multi-statement table-valued functions.
+        returns_table: matches!(kind.as_str(), "IF" | "TF" | "FT"),
+    })
+}

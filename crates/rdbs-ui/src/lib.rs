@@ -16,6 +16,7 @@ pub mod theme;
 mod tools;
 mod welcome;
 mod widgets;
+mod window;
 mod workspace;
 
 pub use app::{AppConfig, InitError, StudioApp};
