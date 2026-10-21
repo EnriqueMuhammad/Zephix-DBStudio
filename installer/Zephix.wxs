@@ -10,8 +10,8 @@
   Built by scripts/release.ps1:
     dotnet tool run wix build installer/Zephix.wxs -arch x64
       -ext WixToolset.UI.wixext -d LicenseRtf=<License.rtf>
-      -d Version=0.1.0 -d ExePath=<zephix.exe> -d IconPath=apps/zephix/assets/zephix.ico
-      -o dist/Zephix-0.1.0-x64.msi
+      -d Version=<version> -d ExePath=<zephix.exe> -d IconPath=apps/zephix/assets/zephix.ico
+      -o dist/Zephix-<version>-x64.msi
 -->
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
      xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">

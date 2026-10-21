@@ -17,7 +17,7 @@
 
 .EXAMPLE
   .\scripts\sign.ps1 dist\stage\zephix.exe
-  .\scripts\sign.ps1 -Require dist\Zephix-0.2.0-x64.msi
+  .\scripts\sign.ps1 -Require dist\Zephix-<version>-x64.msi
 #>
 param(
     [Parameter(Mandatory, ValueFromRemainingArguments)][string[]]$Path,
