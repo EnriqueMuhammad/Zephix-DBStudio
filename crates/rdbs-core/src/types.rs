@@ -132,6 +132,11 @@ pub fn normalize_type(data_type: &str) -> String {
         "timetz" => "time with time zone",
         other => other,
     };
+    // SQL Server reports its default fraction precision; `datetime2` means `datetime2(7)`.
+    let rest = match (canonical, rest.as_str()) {
+        ("datetime2" | "datetimeoffset" | "time", "(7)") => "",
+        _ => rest.as_str(),
+    };
     format!("{canonical}{rest}")
 }
 
@@ -516,6 +521,8 @@ mod tests {
         assert!(equivalent_types("numeric(12, 2)", "decimal(12,2)"));
         assert!(equivalent_types("timestamp without time zone", "timestamp"));
         assert!(!equivalent_types("varchar(50)", "varchar(51)"));
+        assert!(equivalent_types("datetime2", "datetime2(7)"));
+        assert!(!equivalent_types("datetime2", "datetime2(3)"));
         assert!(equivalent_defaults(
             Some("'x'::character varying"),
             Some("'x'")

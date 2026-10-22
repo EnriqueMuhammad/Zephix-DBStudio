@@ -3,6 +3,36 @@
 All notable changes to Zephix. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project uses [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Added
+
+- **Table Sync…** (Tools menu, and the explorer menu of a database or schema) makes the tables
+  of a target equal to the source, on the same or another engine. It synchronizes the
+  **tables and columns** (creates missing tables; adds, changes and optionally drops columns,
+  keys and indexes; rows are not touched), the **data only** (by primary key, as before), or
+  **tables, columns and data**. The Data transfer tool offers the same choices under
+  "Synchronize".
+- Right-clicking a tab offers **Close Tab**, **Close Other Tabs** and **Close All Tabs**;
+  **File > Close All Tabs** (Ctrl+Shift+W) closes every tab.
+
+### Changed
+
+- Data tabs have two tidy bars instead of three: refresh, filter, sort order and row limit (the
+  filter and sort fields share the width) with the connection on the right; below, the row
+  buttons next to Messages and Export.
+- The Database and Schema fields of the transfer, sync, schema comparison and backup tools open
+  their list when the text or the arrow is clicked, and typing filters the list.
+
+### Fixed
+
+- Synchronizing data into MySQL or MariaDB could stop with "affected 0 rows" on date/time
+  columns: values such as `23:59:59` and `23:59:59.000000` now count as equal. MySQL and
+  MariaDB connections also count matched rows as affected, so an `UPDATE` that writes the
+  values a row already has no longer looks like a conflict.
+- SQL Server `datetime2` and `datetime2(7)` columns are no longer reported as different by
+  schema comparison.
+
 ## 0.1.2 - 2026-10-19
 
 ### Added

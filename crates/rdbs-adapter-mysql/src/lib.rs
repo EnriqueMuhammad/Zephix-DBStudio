@@ -59,6 +59,10 @@ fn build_opts(profile: &ConnectionProfile, password: Option<&str>, ssl: Option<S
         .db_name(db)
         .prefer_socket(false)
         .ssl_opts(ssl)
+        // Affected rows count matched rows, as on the other engines: an UPDATE that writes the
+        // values a row already has still counts, so grid edits and sync do not mistake it for
+        // a row changed by someone else.
+        .client_found_rows(true)
         .into()
 }
 

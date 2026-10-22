@@ -21,7 +21,9 @@ use crate::dialog::{ConnectionDialog, DialogAction, TestState};
 use crate::editor;
 use crate::explorer::{self, ExplorerContext, ExplorerState};
 use crate::grid::GridState;
-use crate::model::{AfterPassword, ConnState, ConnStatus, Severity, StatusMessage, UiAction};
+use crate::model::{
+    AfterPassword, ConnState, ConnStatus, Severity, StatusMessage, TabClose, UiAction,
+};
 use crate::theme::{self, color};
 use crate::widgets::{self, ToolbarButton};
 use crate::workspace::{LastRun, Tab, TabContext, Workspace};
@@ -38,6 +40,8 @@ const LIGHT_THEME_KEY: &str = "rdbs.light_theme";
 const SC_NEW_CONNECTION: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::N);
 const SC_NEW_QUERY: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::T);
 const SC_CLOSE_TAB: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::W);
+const SC_CLOSE_ALL_TABS: KeyboardShortcut =
+    KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::W);
 const SC_SIDEBAR: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::B);
 const SC_FILTER: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::F);
 const SC_RUN: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Enter);
@@ -765,6 +769,8 @@ impl StudioApp {
         let pressed = |sc: &KeyboardShortcut| ctx.input_mut(|i| i.consume_shortcut(sc));
         let new_connection = pressed(&SC_NEW_CONNECTION);
         let new_query = pressed(&SC_NEW_QUERY);
+        // Before Ctrl+W, which would also match Ctrl+Shift+W.
+        let close_all_tabs = pressed(&SC_CLOSE_ALL_TABS);
         let close_tab = pressed(&SC_CLOSE_TAB);
         let sidebar = pressed(&SC_SIDEBAR);
         let filter = pressed(&SC_FILTER);
@@ -781,6 +787,9 @@ impl StudioApp {
                 title: None,
                 run: false,
             });
+        }
+        if close_all_tabs {
+            actions.push(UiAction::CloseTabs(TabClose::All));
         }
         if close_tab {
             self.close_active_tab();
@@ -801,12 +810,20 @@ impl StudioApp {
     }
 
     fn close_active_tab(&mut self) {
-        if let Some(Tab::Query(q)) = self.workspace.close_active_tab()
-            && let Some(r) = q.run.running
-        {
-            self.services.send(Command::Cancel {
-                request_id: r.request_id,
-            });
+        let closed = self.workspace.close_active_tab();
+        self.cancel_closed(closed);
+    }
+
+    /// Cancels the queries still running in closed tabs.
+    fn cancel_closed(&self, tabs: impl IntoIterator<Item = Tab>) {
+        for tab in tabs {
+            if let Tab::Query(q) = tab
+                && let Some(r) = q.run.running
+            {
+                self.services.send(Command::Cancel {
+                    request_id: r.request_id,
+                });
+            }
         }
     }
 
@@ -1076,6 +1093,10 @@ impl StudioApp {
                 UiAction::Status(message) => self.status = Some(message),
                 UiAction::ToggleSidebar => {
                     self.workspace.sidebar_visible = !self.workspace.sidebar_visible;
+                }
+                UiAction::CloseTabs(which) => {
+                    let closed = self.workspace.close_tabs(which);
+                    self.cancel_closed(closed);
                 }
             }
         }
@@ -1589,6 +1610,15 @@ impl StudioApp {
                 {
                     self.close_active_tab();
                 }
+                if ui
+                    .add(item(
+                        format!("{}  Close All Tabs", icon::X_SQUARE),
+                        &SC_CLOSE_ALL_TABS,
+                    ))
+                    .clicked()
+                {
+                    actions.push(UiAction::CloseTabs(TabClose::All));
+                }
                 ui.separator();
                 if ui.button(format!("{}  Exit", icon::SIGN_OUT)).clicked() {
                     ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
@@ -1712,6 +1742,14 @@ impl StudioApp {
             .clicked()
         {
             actions.push(UiAction::OpenTool(ToolLaunch::Transfer {
+                source: selected.clone(),
+            }));
+        }
+        if ui
+            .button(format!("{}  Table Sync…", icon::ARROWS_LEFT_RIGHT))
+            .clicked()
+        {
+            actions.push(UiAction::OpenTool(ToolLaunch::Sync {
                 source: selected.clone(),
             }));
         }
@@ -2442,6 +2480,8 @@ impl eframe::App for StudioApp {
                 .show_add_buttons(true)
                 .show_leaf_collapse_buttons(false)
                 .show_leaf_close_all_buttons(false)
+                // Tabs bring their own right-click menu (`TabViewer::on_tab_button`).
+                .tab_context_menus(false)
                 .show_inside(ui, &mut cx);
         });
 

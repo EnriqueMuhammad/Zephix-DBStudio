@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 
 use egui::{Button, ProgressBar, RichText, ScrollArea, Ui};
 use egui_phosphor::regular as icon;
-use rdbs_core::job::{TransferMode, TransferOptions};
+use rdbs_core::job::{SyncScope, TransferMode, TransferOptions};
 use rdbs_core::{Command, Event, RequestId, TableSchema};
 use serde::{Deserialize, Serialize};
 
@@ -60,9 +60,25 @@ impl Transfer {
         }
     }
 
+    /// Synchronisation starting from `source`: tables, columns and data.
+    pub fn new_sync(source: Option<Scope>) -> Self {
+        Self {
+            mode: TransferMode::sync(SyncScope::StructureAndData),
+            ..Self::new(source)
+        }
+    }
+
+    fn is_sync(&self) -> bool {
+        matches!(self.mode, TransferMode::Sync { .. })
+    }
+
     /// Tab title.
     pub fn title(&self) -> String {
-        "Data transfer".to_owned()
+        if self.is_sync() {
+            "Table sync".to_owned()
+        } else {
+            "Data transfer".to_owned()
+        }
     }
 
     /// Consumes this tool's events.
@@ -163,9 +179,11 @@ impl Transfer {
         self.rt.progress = 0.0;
         self.rt.log.clear();
         self.rt.result = None;
-        cx.actions.push(UiAction::Status(StatusMessage::info(
-            "Data transfer started",
-        )));
+        cx.actions
+            .push(UiAction::Status(StatusMessage::info(format!(
+                "{} started",
+                self.title()
+            ))));
     }
 
     /// Renders the tool.
@@ -176,7 +194,7 @@ impl Transfer {
                 header(
                     ui,
                     icon::FLOW_ARROW,
-                    "Data transfer",
+                    &self.title(),
                     "copy or synchronise tables between connections",
                 );
                 ui.add_space(6.0);
@@ -266,7 +284,6 @@ impl Transfer {
     fn options_panel(&mut self, ui: &mut Ui, cx: &mut TabContext<'_>, running: bool) {
         ui.label(RichText::new("Options").strong());
         ui.add_enabled_ui(!running, |ui| {
-            let sync = matches!(self.mode, TransferMode::Sync { .. });
             for mode in [
                 TransferMode::Append,
                 TransferMode::Replace,
@@ -274,34 +291,57 @@ impl Transfer {
             ] {
                 ui.radio_value(&mut self.mode, mode, mode.label());
             }
+            let sync = self.is_sync();
             if ui
-                .radio(
-                    sync,
-                    TransferMode::Sync {
-                        delete_missing: false,
-                    }
-                    .label(),
-                )
-                .on_hover_text("Insert new rows, update changed rows (matched by primary key)")
+                .radio(sync, TransferMode::sync(SyncScope::Data).label())
+                .on_hover_text("Make the target tables equal to the source")
                 .clicked()
                 && !sync
             {
-                self.mode = TransferMode::Sync {
-                    delete_missing: false,
-                };
+                self.mode = TransferMode::sync(SyncScope::StructureAndData);
             }
-            if let TransferMode::Sync { delete_missing } = &mut self.mode {
+            if let TransferMode::Sync {
+                delete_missing,
+                scope,
+                drop_columns,
+            } = &mut self.mode
+            {
                 ui.indent("sync-opts", |ui| {
-                    ui.checkbox(
-                        delete_missing,
-                        "Delete target rows that are not in the source",
-                    );
+                    for s in SyncScope::ALL {
+                        ui.radio_value(scope, s, s.label()).on_hover_text(match s {
+                            SyncScope::Structure => {
+                                "Create missing tables and add, change or drop columns, keys \
+                                 and indexes; rows are not touched"
+                            }
+                            SyncScope::Data => {
+                                "Insert new rows and update changed rows, matched by primary key"
+                            }
+                            SyncScope::StructureAndData => {
+                                "First the tables and columns, then the rows"
+                            }
+                        });
+                    }
+                    if scope.structure() {
+                        ui.checkbox(
+                            drop_columns,
+                            "Drop target columns that are not in the source",
+                        );
+                    }
+                    if scope.data() {
+                        ui.checkbox(
+                            delete_missing,
+                            "Delete target rows that are not in the source",
+                        );
+                    }
                 });
             }
-            ui.checkbox(
-                &mut self.create_missing,
-                "Create tables missing in the target",
-            );
+            // Structure sync always creates missing tables.
+            if !matches!(self.mode, TransferMode::Sync { scope, .. } if scope.structure()) {
+                ui.checkbox(
+                    &mut self.create_missing,
+                    "Create tables missing in the target",
+                );
+            }
         });
         ui.add_space(8.0);
         let ready = self.source.is_some()
@@ -333,14 +373,6 @@ impl Transfer {
             }
         });
         if self.rt.confirm {
-            let destructive = matches!(
-                self.mode,
-                TransferMode::Replace
-                    | TransferMode::Recreate
-                    | TransferMode::Sync {
-                        delete_missing: true
-                    }
-            );
             let target = self
                 .target
                 .as_ref()
@@ -348,20 +380,15 @@ impl Transfer {
                 .unwrap_or_default();
             ui.label(
                 RichText::new(format!(
-                    "{}  Transfer {} table(s) into {target}?{}",
+                    "{}  {}",
                     icon::WARNING,
-                    self.rt.selected.len(),
-                    if destructive {
-                        " Existing target rows will be deleted or replaced."
-                    } else {
-                        ""
-                    }
+                    confirm_text(self.mode, self.rt.selected.len(), &target)
                 ))
                 .color(color::warning()),
             );
             ui.horizontal(|ui| {
                 if ui
-                    .button(RichText::new("Start transfer").color(color::danger()))
+                    .button(RichText::new("Start").color(color::danger()))
                     .clicked()
                 {
                     self.rt.confirm = false;
@@ -399,5 +426,80 @@ impl Transfer {
             Some(Err(e)) => error_box(ui, e),
             None => {}
         }
+    }
+}
+
+/// The question asked before a transfer or synchronisation starts.
+fn confirm_text(mode: TransferMode, tables: usize, target: &str) -> String {
+    let (question, warnings) = match mode {
+        TransferMode::Sync {
+            delete_missing,
+            scope,
+            drop_columns,
+        } => {
+            let what = match scope {
+                SyncScope::Structure => "the tables and columns of",
+                SyncScope::Data => "the rows of",
+                SyncScope::StructureAndData => "the tables, columns and rows of",
+            };
+            let mut warnings = Vec::new();
+            if scope.structure() {
+                warnings.push("Target table definitions will be changed.");
+            }
+            if scope.structure() && drop_columns {
+                warnings
+                    .push("Columns that are not in the source will be dropped with their data.");
+            }
+            if scope.data() && delete_missing {
+                warnings.push("Rows that are not in the source will be deleted.");
+            }
+            (
+                format!("Synchronize {what} {tables} table(s) in {target}?"),
+                warnings,
+            )
+        }
+        TransferMode::Replace | TransferMode::Recreate => (
+            format!("Transfer {tables} table(s) into {target}?"),
+            vec!["Existing target rows will be deleted or replaced."],
+        ),
+        TransferMode::Append => (
+            format!("Transfer {tables} table(s) into {target}?"),
+            Vec::new(),
+        ),
+    };
+    std::iter::once(question.as_str())
+        .chain(warnings)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn confirmation_names_what_changes() {
+        let sync = |scope, delete_missing, drop_columns| TransferMode::Sync {
+            delete_missing,
+            scope,
+            drop_columns,
+        };
+        assert_eq!(
+            confirm_text(TransferMode::Append, 2, "dev"),
+            "Transfer 2 table(s) into dev?"
+        );
+        assert_eq!(
+            confirm_text(sync(SyncScope::Data, false, true), 1, "dev"),
+            "Synchronize the rows of 1 table(s) in dev?"
+        );
+        assert_eq!(
+            confirm_text(sync(SyncScope::Structure, true, true), 3, "prod"),
+            "Synchronize the tables and columns of 3 table(s) in prod? Target table definitions \
+             will be changed. Columns that are not in the source will be dropped with their data."
+        );
+        assert!(
+            confirm_text(sync(SyncScope::StructureAndData, true, false), 1, "x")
+                .ends_with("Rows that are not in the source will be deleted.")
+        );
     }
 }

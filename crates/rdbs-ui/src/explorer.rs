@@ -689,6 +689,14 @@ fn object_menu(
                 source: Some(scope.clone()),
             }));
         }
+        if ui
+            .button(format!("{}  Table Sync…", icon::ARROWS_LEFT_RIGHT))
+            .clicked()
+        {
+            actions.push(UiAction::OpenTool(ToolLaunch::Sync {
+                source: Some(scope.clone()),
+            }));
+        }
         if ui.button(format!("{}  Backup…", icon::ARCHIVE)).clicked() {
             actions.push(UiAction::OpenTool(ToolLaunch::Backup {
                 scope: Some(scope.clone()),

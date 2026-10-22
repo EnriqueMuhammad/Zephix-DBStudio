@@ -15,6 +15,7 @@ pub const SHORTCUTS: &[(&str, &str)] = &[
     ("Ctrl+Enter / Ctrl+R", "Run query or selection"),
     ("Ctrl+Space", "Autocomplete"),
     ("Ctrl+W", "Close tab"),
+    ("Ctrl+Shift+W", "Close all tabs"),
     ("Ctrl+B", "Toggle sidebar"),
     ("Ctrl+F", "Filter explorer"),
     ("F5", "Refresh selected connection"),

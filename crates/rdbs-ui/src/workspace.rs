@@ -13,7 +13,7 @@ use rdbs_services::ServiceHandle;
 use serde::{Deserialize, Serialize};
 
 use crate::grid::GridState;
-use crate::model::{ConnState, UiAction};
+use crate::model::{ConnState, TabClose, UiAction};
 use crate::{editor, welcome};
 
 /// Initial SQL in a fresh workspace.
@@ -120,6 +120,25 @@ impl Workspace {
         let key = self.dock.find_active_focused().map(|(_, t)| t.key())?;
         let path = self.dock.find_tab_from(|t| t.key() == key)?;
         self.dock.remove_tab(path)
+    }
+
+    /// Closes the tabs `which` selects and returns them. After "close others" the kept tab is
+    /// active and focused.
+    pub fn close_tabs(&mut self, which: TabClose) -> Vec<Tab> {
+        let mut closed = Vec::new();
+        while let Some(path) = self.dock.find_tab_from(|t| which.closes(t.key())) {
+            match self.dock.remove_tab(path) {
+                Some(tab) => closed.push(tab),
+                None => break,
+            }
+        }
+        if let TabClose::Others(key) = which
+            && let Some(path) = self.dock.find_tab_from(|t| t.key() == key)
+        {
+            let _ = self.dock.set_active_tab(path);
+            self.dock.set_focused_node_and_surface(path.node_path());
+        }
+        closed
     }
 
     /// Focuses the history tab, opening it if needed.
@@ -443,6 +462,23 @@ impl TabViewer for TabContext<'_> {
         OnCloseResponse::Close
     }
 
+    fn on_tab_button(&mut self, tab: &mut Tab, response: &egui::Response) {
+        // Replaces egui_dock's own tab menu (see `DockArea::tab_context_menus`).
+        let key = tab.key();
+        response.context_menu(|ui| {
+            for (label, which) in [
+                ("Close Tab", TabClose::One(key)),
+                ("Close Other Tabs", TabClose::Others(key)),
+                ("Close All Tabs", TabClose::All),
+            ] {
+                if ui.button(label).clicked() {
+                    self.actions.push(UiAction::CloseTabs(which));
+                    ui.close();
+                }
+            }
+        });
+    }
+
     fn on_add(&mut self, _path: egui_dock::NodePath) {
         self.actions.push(UiAction::NewQuery {
             profile_id: None,
@@ -464,6 +500,35 @@ mod tests {
 
     fn active_is_welcome(w: &mut Workspace) -> bool {
         matches!(w.dock.find_active_focused(), Some((_, Tab::Welcome)))
+    }
+
+    fn keys(w: &Workspace) -> Vec<u64> {
+        w.dock.iter_all_tabs().map(|(_, t)| t.key()).collect()
+    }
+
+    #[test]
+    fn closes_one_other_or_all_tabs() {
+        let mut w = Workspace::default(); // Welcome (0) and Query 1
+        let a = w.open_query_tab(None, String::new(), None);
+        let b = w.open_query_tab(None, String::new(), None);
+        w.show_history();
+
+        let closed = w.close_tabs(TabClose::One(a));
+        assert_eq!(closed.iter().map(Tab::key).collect::<Vec<_>>(), [a]);
+        assert_eq!(keys(&w), [0, 1, b, u64::MAX]);
+
+        let closed = w.close_tabs(TabClose::Others(b));
+        assert_eq!(closed.len(), 3);
+        assert_eq!(keys(&w), [b]);
+        assert!(matches!(w.dock.find_active_focused(), Some((_, Tab::Query(q))) if q.id == b));
+
+        assert_eq!(w.close_tabs(TabClose::All).len(), 1);
+        assert!(keys(&w).is_empty());
+        assert!(w.close_tabs(TabClose::All).is_empty());
+
+        // New tabs still open after everything was closed.
+        let c = w.open_query_tab(None, String::new(), None);
+        assert_eq!(keys(&w), [c]);
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! Connection / database / schema picker shared by the diff, transfer and backup tools.
 
-use egui::{RichText, TextEdit, Ui};
+use egui::{Popup, PopupCloseBehavior, RichText, ScrollArea, SetOpenCommand, TextEdit, Ui};
 use egui_phosphor::regular as icon;
 use rdbs_core::{DatabaseKind, ObjectKind};
 
@@ -50,7 +50,20 @@ fn schemas(conn: Option<&ConnState>, database: Option<&str>) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Text field with a dropdown of known values.
+/// Choices shown for `typed`: all of them, or those containing it while it is not one of them.
+fn matching<'a>(choices: &'a [String], typed: &str) -> Vec<&'a String> {
+    let needle = typed.trim().to_lowercase();
+    if needle.is_empty() || choices.iter().any(|c| c.eq_ignore_ascii_case(typed.trim())) {
+        return choices.iter().collect();
+    }
+    choices
+        .iter()
+        .filter(|c| c.to_lowercase().contains(&needle))
+        .collect()
+}
+
+/// Text field with a dropdown of known values. Clicking the text or the arrow opens the list;
+/// typing filters it, and any other name can still be typed.
 fn text_with_choices(
     ui: &mut Ui,
     id: &str,
@@ -58,25 +71,62 @@ fn text_with_choices(
     choices: &[String],
     hint: &str,
 ) -> bool {
-    let mut changed = ui
-        .add(
+    let mut changed = false;
+    ui.push_id(id, |ui| {
+        let text = ui.add(
             TextEdit::singleline(value)
                 .hint_text(hint)
                 .desired_width(130.0),
-        )
-        .changed();
-    ui.add_enabled_ui(!choices.is_empty(), |ui| {
-        ui.push_id(id, |ui| {
-            ui.menu_button(icon::CARET_DOWN, |ui| {
-                for c in choices {
-                    if ui.selectable_label(value == c, c).clicked() {
-                        value.clone_from(c);
-                        changed = true;
-                        ui.close();
-                    }
+        );
+        changed |= text.changed();
+        let arrow = ui.button(icon::CARET_DOWN);
+        let command = if arrow.clicked() {
+            Some(SetOpenCommand::Toggle)
+        } else if text.clicked() || text.gained_focus() || text.changed() {
+            Some(SetOpenCommand::Bool(true))
+        } else {
+            None
+        };
+        let anchor = text.rect.union(arrow.rect);
+        let popup_id = ui.id().with("choices");
+        // Closed by hand: a click into the text (to place the cursor) keeps the list open.
+        let popup = Popup::new(popup_id, ui.ctx().clone(), anchor, ui.layer_id())
+            .open_memory(command)
+            .close_behavior(PopupCloseBehavior::IgnoreClicks)
+            .width(anchor.width())
+            .show(|ui| {
+                let shown = matching(choices, value);
+                if shown.is_empty() {
+                    let note = if choices.is_empty() {
+                        "Nothing loaded yet; type a name"
+                    } else {
+                        "No match; the typed name is used"
+                    };
+                    ui.label(RichText::new(note).color(color::text_dim()));
+                    return;
                 }
+                ScrollArea::vertical().max_height(240.0).show(ui, |ui| {
+                    for c in shown {
+                        if ui.selectable_label(value == c, c).clicked() {
+                            value.clone_from(c);
+                            changed = true;
+                            Popup::close_id(ui.ctx(), popup_id);
+                        }
+                    }
+                });
             });
-        });
+        if let Some(popup) = popup {
+            let clicked_elsewhere = ui.input(|i| {
+                i.pointer.any_pressed()
+                    && i.pointer
+                        .interact_pos()
+                        .is_some_and(|p| !anchor.contains(p) && !popup.response.rect.contains(p))
+            });
+            let tabbed_away = text.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Tab));
+            if clicked_elsewhere || tabbed_away {
+                Popup::close_id(ui.ctx(), popup_id);
+            }
+        }
     });
     changed
 }
@@ -154,4 +204,25 @@ pub fn show(ui: &mut Ui, id: &str, scope: &mut Option<Scope>, cx: &mut TabContex
         });
     });
     changed
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn typing_filters_the_choices() {
+        let choices: Vec<String> = ["app_dev", "app_test", "shop"].map(String::from).into();
+        let names = |typed: &str| -> Vec<&str> {
+            matching(&choices, typed)
+                .into_iter()
+                .map(String::as_str)
+                .collect()
+        };
+        assert_eq!(names(""), ["app_dev", "app_test", "shop"]);
+        assert_eq!(names("APP"), ["app_dev", "app_test"]);
+        // A complete name still lists everything, so another one can be picked.
+        assert_eq!(names("shop"), ["app_dev", "app_test", "shop"]);
+        assert!(names("nope").is_empty());
+    }
 }

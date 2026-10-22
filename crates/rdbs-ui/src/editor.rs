@@ -157,76 +157,16 @@ fn toolbar(ui: &mut Ui, q: &mut QueryTab, cx: &mut TabContext<'_>) {
     });
 }
 
-/// Toolbar of a data tab: refresh, filter, sort order and row limit of one table or view.
+/// Width of the row-limit box in the data toolbar.
+const LIMIT_WIDTH: f32 = 110.0;
+
+/// Toolbar of a data tab: refresh, filter, sort order and row limit of one table or view on the
+/// left (the text fields share the free width), the connection and "Open as Query" on the right.
 fn data_toolbar(ui: &mut Ui, q: &mut QueryTab, cx: &mut TabContext<'_>) {
     let running = q.run.running.is_some();
     let mut apply = false;
     ui.horizontal(|ui| {
-        let refresh = Button::new(
-            RichText::new(format!("{}  Refresh", icon::ARROWS_CLOCKWISE)).color(color::success()),
-        );
-        if ui
-            .add_enabled(!running, refresh)
-            .on_hover_text("Load the rows again (Ctrl+Enter)")
-            .clicked()
-        {
-            apply = true;
-        }
-        let stop =
-            Button::new(RichText::new(format!("{}  Stop", icon::STOP)).color(color::danger()));
-        if ui.add_enabled(running, stop).clicked()
-            && let Some(r) = &q.run.running
-        {
-            cx.services.send(Command::Cancel {
-                request_id: r.request_id,
-            });
-        }
-        if let Some(p) = q.profile_id.and_then(|id| cx.profile(id)) {
-            ui.label(
-                RichText::new(format!("{}  {}", p.kind.badge(), p.name)).color(color::text_dim()),
-            );
-            widgets::env_pill(ui, p.environment);
-        }
-        ui.separator();
-        let Some(view) = q.data_view.as_mut() else {
-            return;
-        };
-        ui.label(RichText::new(icon::FUNNEL).color(color::text_dim()))
-            .on_hover_text("Filter (WHERE)");
-        let filter = ui.add(
-            TextEdit::singleline(&mut view.filter)
-                .hint_text("Filter, e.g. country = 'Indonesia'")
-                .desired_width(260.0),
-        );
-        ui.label(RichText::new(icon::SORT_ASCENDING).color(color::text_dim()))
-            .on_hover_text("Sort (ORDER BY)");
-        let order = ui.add(
-            TextEdit::singleline(&mut view.order)
-                .hint_text("Sort, e.g. created_at DESC")
-                .desired_width(180.0),
-        );
-        let entered =
-            |r: &egui::Response| r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-        if entered(&filter) || entered(&order) {
-            apply = true;
-        }
-        let label = |limit: Option<u32>| match limit {
-            Some(n) => format!("{} rows", format_count(u64::from(n))),
-            None => "All rows".to_owned(),
-        };
-        egui::ComboBox::from_id_salt(("data-limit", q.id))
-            .width(110.0)
-            .selected_text(label(view.limit))
-            .show_ui(ui, |ui| {
-                for limit in crate::workspace::DataView::LIMITS {
-                    if ui
-                        .selectable_value(&mut view.limit, limit, label(limit))
-                        .changed()
-                    {
-                        apply = true;
-                    }
-                }
-            });
+        // The right side is laid out first so that the fields can take what is left.
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             if ui
                 .button(format!("{}  Open as Query", icon::FILE_SQL))
@@ -237,11 +177,98 @@ fn data_toolbar(ui: &mut Ui, q: &mut QueryTab, cx: &mut TabContext<'_>) {
                 q.sql = view.sql();
                 q.run.focus_editor = true;
             }
+            if let Some(p) = q.profile_id.and_then(|id| cx.profile(id)) {
+                ui.separator();
+                widgets::env_pill(ui, p.environment);
+                ui.label(
+                    RichText::new(format!("{}  {}", p.kind.badge(), p.name))
+                        .color(color::text_dim()),
+                )
+                .on_hover_text(p.endpoint());
+            }
+            ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                let refresh = Button::new(
+                    RichText::new(format!("{}  Refresh", icon::ARROWS_CLOCKWISE))
+                        .color(color::success()),
+                );
+                if ui
+                    .add_enabled(!running, refresh)
+                    .on_hover_text("Load the rows again (Ctrl+Enter)")
+                    .clicked()
+                {
+                    apply = true;
+                }
+                let stop = Button::new(
+                    RichText::new(format!("{}  Stop", icon::STOP)).color(color::danger()),
+                );
+                if ui.add_enabled(running, stop).clicked()
+                    && let Some(r) = &q.run.running
+                {
+                    cx.services.send(Command::Cancel {
+                        request_id: r.request_id,
+                    });
+                }
+                ui.separator();
+                let Some(view) = q.data_view.as_mut() else {
+                    return;
+                };
+                let (filter_width, order_width) = field_widths(ui);
+                ui.label(RichText::new(icon::FUNNEL).color(color::text_dim()))
+                    .on_hover_text("Filter (WHERE)");
+                let filter = ui.add(
+                    TextEdit::singleline(&mut view.filter)
+                        .hint_text("Filter, e.g. country = 'Indonesia'")
+                        .desired_width(filter_width),
+                );
+                ui.label(RichText::new(icon::SORT_ASCENDING).color(color::text_dim()))
+                    .on_hover_text("Sort (ORDER BY)");
+                let order = ui.add(
+                    TextEdit::singleline(&mut view.order)
+                        .hint_text("Sort, e.g. created_at DESC")
+                        .desired_width(order_width),
+                );
+                let entered = |r: &egui::Response| {
+                    r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter))
+                };
+                if entered(&filter) || entered(&order) {
+                    apply = true;
+                }
+                let label = |limit: Option<u32>| match limit {
+                    Some(n) => format!("{} rows", format_count(u64::from(n))),
+                    None => "All rows".to_owned(),
+                };
+                egui::ComboBox::from_id_salt(("data-limit", q.id))
+                    .width(LIMIT_WIDTH)
+                    .selected_text(label(view.limit))
+                    .show_ui(ui, |ui| {
+                        for limit in crate::workspace::DataView::LIMITS {
+                            if ui
+                                .selectable_value(&mut view.limit, limit, label(limit))
+                                .changed()
+                            {
+                                apply = true;
+                            }
+                        }
+                    });
+            });
         });
     });
     if apply {
         request_run(q, cx);
     }
+}
+
+/// Text widths of the filter and sort fields: the free width of the toolbar row (after the
+/// icons, the row-limit box and the gaps), split 3:2, within sensible bounds.
+fn field_widths(ui: &Ui) -> (f32, f32) {
+    let gap = ui.spacing().item_spacing.x;
+    let icon = ui.spacing().interact_size.y;
+    // Two icons, the limit box with its arrow, the fields' own margins and the gaps between.
+    let fixed = 2.0 * icon + LIMIT_WIDTH + ui.spacing().icon_width + 4.0 * 8.0 + 6.0 * gap;
+    let free = (ui.available_width() - fixed).max(0.0);
+    let filter = (free * 0.6).clamp(160.0, 560.0);
+    let order = (free - filter).clamp(120.0, 360.0);
+    (filter, order)
 }
 
 /// Database selector for engines where a session is bound to one database.
@@ -700,6 +727,7 @@ fn results(ui: &mut Ui, q: &mut QueryTab, cx: &mut TabContext<'_>) {
         return;
     }
     let kind = q.profile_id.and_then(|id| cx.profile(id)).map(|p| p.kind);
+    let data_tab = q.data_view.is_some();
     let export_table = export_table_name(&q.title);
     let table = q.table.clone();
     let RunState {
@@ -764,6 +792,90 @@ fn results(ui: &mut Ui, q: &mut QueryTab, cx: &mut TabContext<'_>) {
             let count = outcome.results.len();
             if *active_result >= count {
                 *active_result = count.saturating_sub(1);
+            }
+            // A data tab shows one result set: its row buttons, Messages and Export share one
+            // bar under the toolbar.
+            if data_tab && count <= 1 {
+                let rs = outcome.results.first();
+                let edit_state = match (&table, rs) {
+                    (Some(t), Some(rs)) if !*show_messages => Some(editability(t, rs, count)),
+                    _ => None,
+                };
+                Frame::new()
+                    .fill(color::panel())
+                    .inner_margin(Margin::symmetric(8, 3))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                ui.add_enabled_ui(rs.is_some(), |ui| {
+                                    ui.menu_button(format!("{}  Export", icon::EXPORT), |ui| {
+                                        if let Some(rs) = rs {
+                                            export_menu(ui, rs, kind, &export_table, cx.actions);
+                                        }
+                                    });
+                                });
+                                let messages_label = if outcome.messages.is_empty() {
+                                    format!("{}  Messages", icon::CHAT_TEXT)
+                                } else {
+                                    format!(
+                                        "{}  Messages ({})",
+                                        icon::CHAT_TEXT,
+                                        outcome.messages.len()
+                                    )
+                                };
+                                if ui
+                                    .selectable_label(
+                                        *show_messages || rs.is_none(),
+                                        messages_label,
+                                    )
+                                    .on_hover_text("Server messages (click again for the rows)")
+                                    .clicked()
+                                {
+                                    *show_messages = !*show_messages;
+                                }
+                                let (Some(state), Some(rs)) = (&edit_state, rs) else {
+                                    return;
+                                };
+                                ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                                    if edit_actions(
+                                        ui,
+                                        state,
+                                        rs,
+                                        edits,
+                                        grid_state,
+                                        saving.is_some(),
+                                    ) {
+                                        ui.with_layout(
+                                            Layout::right_to_left(Align::Center),
+                                            |ui| {
+                                                ui.add_space(8.0);
+                                                save_actions(
+                                                    ui,
+                                                    q.id,
+                                                    rs,
+                                                    table.as_ref(),
+                                                    edits,
+                                                    saving.is_some(),
+                                                    edit_error,
+                                                    cx.actions,
+                                                );
+                                            },
+                                        );
+                                    }
+                                });
+                            });
+                        });
+                        edit_error_label(ui, edit_error);
+                    });
+                match rs {
+                    Some(rs) if !*show_messages => {
+                        let mode = matches!(edit_state, Some(Editability::Editable))
+                            .then_some(grid::EditMode { edits, editing });
+                        grid::show(ui, Id::new(("grid", q.id, 0)), rs, grid_state, mode);
+                    }
+                    _ => messages(ui, last),
+                }
+                return;
             }
             // Several result sets: stacked one above the other (remembered across runs) or as
             // tabs.
@@ -971,108 +1083,141 @@ fn edit_bar(
         .inner_margin(Margin::symmetric(8, 4))
         .show(ui, |ui| {
             ui.horizontal(|ui| {
-                match state {
-                    Editability::ReadOnly(reason) => {
-                        ui.label(
-                            RichText::new(format!("{}  {reason}", icon::LOCK))
-                                .size(12.0)
-                                .color(color::text_faint()),
-                        );
-                        return;
-                    }
-                    Editability::Editable => {}
-                }
-                ui.add_enabled_ui(!saving, |ui| {
-                    if ui
-                        .button(format!("{}  Row", icon::PLUS))
-                        .on_hover_text("Add a new row")
-                        .clicked()
-                    {
-                        edits.add_row(rs.columns.len());
-                        grid_state.selected = Some((rs.rows.len() + edits.inserted.len() - 1, 0));
-                    }
-                    let selected_row = grid_state
-                        .selected
-                        .map(|(r, _)| r)
-                        .filter(|r| *r < rs.rows.len());
-                    if ui
-                        .add_enabled(
-                            selected_row.is_some(),
-                            Button::new(format!("{}  Delete", icon::TRASH)),
-                        )
-                        .on_hover_text("Mark the selected row for deletion (toggle)")
-                        .clicked()
-                        && let Some(r) = selected_row
-                    {
-                        edits.toggle_delete(r);
-                    }
-                });
-                if edits.is_empty() {
-                    ui.label(
-                        RichText::new("Double-click a cell to edit")
-                            .size(12.0)
-                            .color(color::text_faint()),
-                    );
-                    return;
-                }
-                ui.separator();
-                let count = edits.row_count();
-                ui.label(
-                    RichText::new(format!("{count} pending"))
-                        .size(12.0)
-                        .color(color::warning()),
-                );
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    ui.add_enabled_ui(!saving, |ui| {
-                        let save = Button::new(
-                            RichText::new(format!("{}  Save changes", icon::FLOPPY_DISK))
-                                .color(egui::Color32::WHITE),
-                        )
-                        .fill(color::accent());
-                        if ui.add(save).clicked() {
-                            *edit_error = None;
-                            actions.push(UiAction::SaveEdits { tab_id });
-                        }
-                        if ui
-                            .button(format!("{}  Discard", icon::ARROW_CLOCKWISE))
-                            .clicked()
-                        {
-                            *edits = rdbs_core::edit::PendingEdits::default();
-                            *edit_error = None;
-                        }
-                        if ui
-                            .button(format!("{}  Copy SQL", icon::COPY))
-                            .on_hover_text("Copy the statements that Save will run")
-                            .clicked()
-                            && let Some(t) = table
-                        {
-                            match rdbs_core::edit::build_changes(t, rs, edits) {
-                                Ok(changes) => {
-                                    let script = changes
-                                        .iter()
-                                        .map(|c| format!("{};", c.sql))
-                                        .collect::<Vec<_>>()
-                                        .join("\n");
-                                    ui.ctx().copy_text(script);
-                                }
-                                Err(e) => *edit_error = Some(e.to_string()),
-                            }
-                        }
+                if edit_actions(ui, state, rs, edits, grid_state, saving) {
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        save_actions(ui, tab_id, rs, table, edits, saving, edit_error, actions);
                     });
-                    if saving {
-                        ui.add(egui::Spinner::new().size(14.0));
-                    }
-                });
+                }
             });
-            if let Some(err) = edit_error {
-                ui.add(
-                    egui::Label::new(
-                        RichText::new(format!("{}  {err}", icon::WARNING)).color(color::danger()),
-                    )
-                    .wrap(),
-                );
-            }
+            edit_error_label(ui, edit_error);
         });
+}
+
+/// Left part of the edit controls: why the grid is read-only, or the row buttons followed by
+/// a hint or the number of pending changes. Returns whether there are changes to save.
+fn edit_actions(
+    ui: &mut Ui,
+    state: &Editability,
+    rs: &rdbs_core::ResultSet,
+    edits: &mut rdbs_core::edit::PendingEdits,
+    grid_state: &mut grid::GridState,
+    saving: bool,
+) -> bool {
+    if let Editability::ReadOnly(reason) = state {
+        ui.label(
+            RichText::new(format!("{}  {reason}", icon::LOCK))
+                .size(12.0)
+                .color(color::text_faint()),
+        );
+        return false;
+    }
+    ui.add_enabled_ui(!saving, |ui| {
+        if ui
+            .button(format!("{}  Row", icon::PLUS))
+            .on_hover_text("Add a new row")
+            .clicked()
+        {
+            edits.add_row(rs.columns.len());
+            grid_state.selected = Some((rs.rows.len() + edits.inserted.len() - 1, 0));
+        }
+        let selected_row = grid_state
+            .selected
+            .map(|(r, _)| r)
+            .filter(|r| *r < rs.rows.len());
+        if ui
+            .add_enabled(
+                selected_row.is_some(),
+                Button::new(format!("{}  Delete", icon::TRASH)),
+            )
+            .on_hover_text("Mark the selected row for deletion (toggle)")
+            .clicked()
+            && let Some(r) = selected_row
+        {
+            edits.toggle_delete(r);
+        }
+    });
+    if edits.is_empty() {
+        ui.label(
+            RichText::new("Double-click a cell to edit")
+                .size(12.0)
+                .color(color::text_faint()),
+        );
+        return false;
+    }
+    ui.separator();
+    ui.label(
+        RichText::new(format!("{} pending", edits.row_count()))
+            .size(12.0)
+            .color(color::warning()),
+    );
+    true
+}
+
+/// Save, Discard and Copy SQL, for a right-to-left layout.
+#[allow(clippy::too_many_arguments)]
+fn save_actions(
+    ui: &mut Ui,
+    tab_id: u64,
+    rs: &rdbs_core::ResultSet,
+    table: Option<&rdbs_core::edit::TableTarget>,
+    edits: &mut rdbs_core::edit::PendingEdits,
+    saving: bool,
+    edit_error: &mut Option<String>,
+    actions: &mut Vec<UiAction>,
+) {
+    ui.add_enabled_ui(!saving, |ui| {
+        let save = Button::new(
+            RichText::new(format!("{}  Save changes", icon::FLOPPY_DISK))
+                .color(egui::Color32::WHITE),
+        )
+        .fill(color::accent());
+        if ui.add(save).clicked() {
+            *edit_error = None;
+            actions.push(UiAction::SaveEdits { tab_id });
+        }
+        if ui
+            .button(format!("{}  Discard", icon::ARROW_CLOCKWISE))
+            .clicked()
+        {
+            *edits = rdbs_core::edit::PendingEdits::default();
+            *edit_error = None;
+        }
+        if ui
+            .button(format!("{}  Copy SQL", icon::COPY))
+            .on_hover_text("Copy the statements that Save will run")
+            .clicked()
+            && let Some(t) = table
+        {
+            match rdbs_core::edit::build_changes(t, rs, edits) {
+                Ok(changes) => {
+                    let script = changes
+                        .iter()
+                        .map(|c| format!("{};", c.sql))
+                        .collect::<Vec<_>>()
+                        .join(
+                            "
+",
+                        );
+                    ui.ctx().copy_text(script);
+                }
+                Err(e) => *edit_error = Some(e.to_string()),
+            }
+        }
+    });
+    if saving {
+        ui.add(egui::Spinner::new().size(14.0));
+    }
+}
+
+fn edit_error_label(ui: &mut Ui, edit_error: &Option<String>) {
+    if let Some(err) = edit_error {
+        ui.add(
+            egui::Label::new(
+                RichText::new(format!("{}  {err}", icon::WARNING)).color(color::danger()),
+            )
+            .wrap(),
+        );
+    }
 }
 
 /// Table name used for SQL `INSERT` exports: the tab title when it is a plain identifier

@@ -7,7 +7,7 @@ use rdbs_adapter_mssql::MssqlFactory;
 use rdbs_adapter_mysql::MySqlFactory;
 use rdbs_adapter_postgres::PostgresFactory;
 use rdbs_adapter_sqlite::SqliteAdapter;
-use rdbs_core::job::{TransferMode, TransferOptions};
+use rdbs_core::job::{SyncScope, TransferMode, TransferOptions};
 use rdbs_core::{
     AdapterFactory, CancelHandle, CellValue, ConnectionProfile, DatabaseAdapter, DatabaseKind,
     SslMode,
@@ -117,6 +117,8 @@ async fn sqlite_copy_then_sync() {
     let sync = TransferOptions {
         mode: TransferMode::Sync {
             delete_missing: true,
+            scope: SyncScope::Data,
+            drop_columns: false,
         },
         ..options
     };
@@ -158,6 +160,8 @@ async fn sqlite_copy_then_sync() {
         TransferOptions {
             mode: TransferMode::Sync {
                 delete_missing: true,
+                scope: SyncScope::Data,
+                drop_columns: false,
             },
             ..TransferOptions::default()
         },
@@ -167,6 +171,136 @@ async fn sqlite_copy_then_sync() {
         again
             .iter()
             .all(|s| s.inserted + s.updated + s.deleted == 0),
+        "{again:?}"
+    );
+}
+
+fn sync_options(scope: SyncScope, drop_columns: bool) -> TransferOptions {
+    TransferOptions {
+        mode: TransferMode::Sync {
+            delete_missing: true,
+            scope,
+            drop_columns,
+        },
+        ..TransferOptions::default()
+    }
+}
+
+async fn column_names(
+    db: &mut dyn DatabaseAdapter,
+    schema: Option<&str>,
+    table: &str,
+) -> Vec<String> {
+    let tables = db.describe_schema(schema).await.expect("describe");
+    let t = tables
+        .iter()
+        .find(|t| t.name.eq_ignore_ascii_case(table))
+        .unwrap_or_else(|| panic!("table {table} missing"));
+    t.columns.iter().map(|c| c.name.to_lowercase()).collect()
+}
+
+#[tokio::test]
+async fn sqlite_structure_sync() {
+    let mut src = sqlite_file("struct-src").await;
+    let mut dst = sqlite_file("struct-dst").await;
+    exec(
+        src.as_mut(),
+        "CREATE TABLE customers (id INTEGER PRIMARY KEY, name TEXT NOT NULL, email TEXT); \
+         CREATE TABLE orders (id INTEGER PRIMARY KEY, customer_id INTEGER REFERENCES customers(id)); \
+         INSERT INTO customers VALUES (1, 'Ayu', 'ayu@example.com'), (2, 'Budi', NULL); \
+         INSERT INTO orders VALUES (10, 1);",
+    )
+    .await;
+    exec(
+        dst.as_mut(),
+        "CREATE TABLE customers (id INTEGER PRIMARY KEY, name TEXT NOT NULL, legacy TEXT); \
+         INSERT INTO customers VALUES (1, 'Old name', 'keep me');",
+    )
+    .await;
+
+    // Tables and columns only: rows are untouched, extra columns are kept.
+    let summary = transfer(
+        src.as_mut(),
+        DatabaseKind::Sqlite,
+        dst.as_mut(),
+        DatabaseKind::Sqlite,
+        sync_options(SyncScope::Structure, false),
+    )
+    .await;
+    let customers = summary
+        .iter()
+        .find(|s| s.table == "customers")
+        .expect("customers");
+    let orders = summary
+        .iter()
+        .find(|s| s.table == "orders")
+        .expect("orders");
+    assert!(customers.altered && !customers.created, "{summary:?}");
+    assert!(orders.created, "{summary:?}");
+    assert!(
+        summary
+            .iter()
+            .all(|s| s.inserted + s.updated + s.deleted == 0)
+    );
+    assert_eq!(
+        column_names(dst.as_mut(), None, "customers").await,
+        ["id", "name", "email", "legacy"]
+    );
+    assert_eq!(
+        scalar(dst.as_mut(), "SELECT legacy FROM customers WHERE id = 1").await,
+        CellValue::Text("keep me".into()),
+        "existing rows survive the table rebuild"
+    );
+    assert_eq!(
+        as_int(scalar(dst.as_mut(), "SELECT count(*) FROM orders").await),
+        0
+    );
+
+    // Tables, columns and data, dropping extra columns.
+    let summary = transfer(
+        src.as_mut(),
+        DatabaseKind::Sqlite,
+        dst.as_mut(),
+        DatabaseKind::Sqlite,
+        sync_options(SyncScope::StructureAndData, true),
+    )
+    .await;
+    let customers = summary
+        .iter()
+        .find(|s| s.table == "customers")
+        .expect("customers");
+    assert!(customers.altered, "{summary:?}");
+    assert_eq!(
+        (customers.inserted, customers.updated),
+        (1, 1),
+        "{summary:?}"
+    );
+    assert_eq!(
+        column_names(dst.as_mut(), None, "customers").await,
+        ["id", "name", "email"]
+    );
+    assert_eq!(
+        scalar(dst.as_mut(), "SELECT name FROM customers WHERE id = 1").await,
+        CellValue::Text("Ayu".into())
+    );
+    assert_eq!(
+        as_int(scalar(dst.as_mut(), "SELECT count(*) FROM orders").await),
+        1
+    );
+
+    // Nothing left to do.
+    let again = transfer(
+        src.as_mut(),
+        DatabaseKind::Sqlite,
+        dst.as_mut(),
+        DatabaseKind::Sqlite,
+        sync_options(SyncScope::StructureAndData, true),
+    )
+    .await;
+    assert!(
+        again
+            .iter()
+            .all(|s| !s.created && !s.altered && s.inserted + s.updated + s.deleted == 0),
         "{again:?}"
     );
 }
@@ -348,6 +482,8 @@ async fn postgres_to_mysql_mssql_and_sqlite() {
         TransferOptions {
             mode: TransferMode::Sync {
                 delete_missing: true,
+                scope: SyncScope::Data,
+                drop_columns: false,
             },
             ..ms_options
         },
@@ -363,6 +499,144 @@ async fn postgres_to_mysql_mssql_and_sqlite() {
         teams.deleted, 1,
         "the extra team inserted on SQL Server is removed: {summary:?}"
     );
+}
+
+/// Structure sync from PostgreSQL into an empty target, then after a column was added on each
+/// side; a final sync must find nothing to change (no type or default noise across engines).
+async fn structure_sync_round(
+    pg: &mut dyn DatabaseAdapter,
+    target: &mut dyn DatabaseAdapter,
+    kind: DatabaseKind,
+    target_schema: Option<&str>,
+    players: &str,
+) {
+    let options = |drop_columns| TransferOptions {
+        source_schema: Some("it_sync".into()),
+        target_schema: target_schema.map(str::to_owned),
+        ..sync_options(SyncScope::StructureAndData, drop_columns)
+    };
+    let label = format!("{kind:?}");
+    let first = transfer(pg, DatabaseKind::PostgreSql, target, kind, options(false)).await;
+    assert!(first.iter().all(|s| s.created), "{label}: {first:?}");
+    check_target(target, players).await;
+
+    exec(
+        pg,
+        "ALTER TABLE it_sync.players ADD COLUMN nickname varchar(30)",
+    )
+    .await;
+    exec(
+        pg,
+        "UPDATE it_sync.players SET nickname = 'Yu' WHERE name = 'Ayu'",
+    )
+    .await;
+    exec(
+        target,
+        &format!("ALTER TABLE {players} ADD legacy varchar(10)"),
+    )
+    .await;
+    let second = transfer(pg, DatabaseKind::PostgreSql, target, kind, options(false)).await;
+    let p = second
+        .iter()
+        .find(|s| s.table == "players")
+        .expect("players");
+    assert!(p.altered && p.updated == 1, "{label}: {second:?}");
+    let cols = column_names(target, target_schema, "players").await;
+    assert!(
+        cols.contains(&"nickname".to_owned()) && cols.contains(&"legacy".to_owned()),
+        "{label}: {cols:?}"
+    );
+    assert_eq!(
+        scalar(
+            target,
+            &format!("SELECT nickname FROM {players} WHERE name = 'Ayu'")
+        )
+        .await,
+        CellValue::Text("Yu".into()),
+        "{label}"
+    );
+
+    let third = transfer(pg, DatabaseKind::PostgreSql, target, kind, options(true)).await;
+    let p = third
+        .iter()
+        .find(|s| s.table == "players")
+        .expect("players");
+    assert!(p.altered, "{label}: legacy is dropped: {third:?}");
+    assert!(
+        !column_names(target, target_schema, "players")
+            .await
+            .contains(&"legacy".to_owned())
+    );
+
+    let last = transfer(pg, DatabaseKind::PostgreSql, target, kind, options(true)).await;
+    assert!(
+        last.iter()
+            .all(|s| !s.created && !s.altered && s.inserted + s.updated + s.deleted == 0),
+        "{label}: nothing left to do: {last:?}"
+    );
+}
+
+#[tokio::test]
+async fn postgres_structure_sync_to_postgres_mysql_and_mssql() {
+    if !it() {
+        eprintln!("skipped: set RDBS_IT=1");
+        return;
+    }
+
+    // PostgreSQL, another schema
+    let mut pg = pg_source("it_sync").await;
+    let mut dst = postgres().await;
+    exec(
+        dst.as_mut(),
+        "DROP SCHEMA IF EXISTS it_sync_dst CASCADE; CREATE SCHEMA it_sync_dst",
+    )
+    .await;
+    structure_sync_round(
+        pg.as_mut(),
+        dst.as_mut(),
+        DatabaseKind::PostgreSql,
+        Some("it_sync_dst"),
+        "it_sync_dst.players",
+    )
+    .await;
+
+    // MySQL
+    let mut pg = pg_source("it_sync").await;
+    let mut admin = mysql("rdbs_test").await;
+    exec(
+        admin.as_mut(),
+        "DROP DATABASE IF EXISTS rdbs_it_sync; CREATE DATABASE rdbs_it_sync",
+    )
+    .await;
+    let mut my = mysql("rdbs_it_sync").await;
+    structure_sync_round(
+        pg.as_mut(),
+        my.as_mut(),
+        DatabaseKind::MySql,
+        None,
+        "players",
+    )
+    .await;
+
+    // SQL Server
+    let mut pg = pg_source("it_sync").await;
+    let mut ms = mssql().await;
+    exec(
+        ms.as_mut(),
+        "IF OBJECT_ID(N'it_sync.players') IS NOT NULL DROP TABLE it_sync.players; \
+         IF OBJECT_ID(N'it_sync.teams') IS NOT NULL DROP TABLE it_sync.teams; \
+         IF SCHEMA_ID(N'it_sync') IS NOT NULL DROP SCHEMA it_sync;",
+    )
+    .await;
+    exec(ms.as_mut(), "CREATE SCHEMA it_sync").await;
+    structure_sync_round(
+        pg.as_mut(),
+        ms.as_mut(),
+        DatabaseKind::SqlServer,
+        Some("it_sync"),
+        "it_sync.players",
+    )
+    .await;
 }
 
 #[tokio::test]

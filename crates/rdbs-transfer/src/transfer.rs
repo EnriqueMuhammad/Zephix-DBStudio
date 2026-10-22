@@ -2,8 +2,9 @@
 //!
 //! Tables are copied in foreign-key order (referenced tables first); tables created in the
 //! target get their foreign keys at the end, so cycles are fine. Rows are read in pages and
-//! written one transaction per page. Synchronisation compares rows by primary key and only
-//! writes the differences.
+//! written one transaction per page. Synchronisation can first bring the table definitions in
+//! line (create missing tables, alter existing ones), then compares rows by primary key and
+//! only writes the differences.
 
 use std::collections::HashMap;
 
@@ -13,7 +14,8 @@ use rdbs_core::edit::Change;
 use rdbs_core::export::sql_literal;
 use rdbs_core::job::{TransferMode, TransferOptions};
 use rdbs_core::{
-    CancelHandle, CellValue, DatabaseAdapter, DatabaseKind, DbError, DbErrorKind, TableSchema,
+    CancelHandle, CellValue, ColumnDef, DatabaseAdapter, DatabaseKind, DbError, DbErrorKind,
+    TableSchema,
 };
 
 /// Progress report: a message and the overall fraction done (0–1).
@@ -38,24 +40,143 @@ pub struct TableSummary {
     pub deleted: u64,
     /// Whether the table was created in the target.
     pub created: bool,
+    /// Whether the target table's definition was changed (sync).
+    pub altered: bool,
 }
 
 /// Human-readable summary of a finished transfer.
 pub fn summary_text(tables: &[TableSummary]) -> String {
     let sum = |f: fn(&TableSummary) -> u64| tables.iter().map(f).sum::<u64>();
-    let created = tables.iter().filter(|t| t.created).count();
-    format!(
-        "{} table(s): {} inserted, {} updated, {} deleted{}",
+    let count = |f: fn(&TableSummary) -> bool| tables.iter().filter(|t| f(t)).count();
+    let mut text = format!(
+        "{} table(s): {} inserted, {} updated, {} deleted",
         tables.len(),
         sum(|t| t.inserted),
         sum(|t| t.updated),
         sum(|t| t.deleted),
-        if created > 0 {
-            format!(", {created} created")
-        } else {
-            String::new()
+    );
+    for (n, what) in [
+        (count(|t| t.created), "created"),
+        (count(|t| t.altered), "altered"),
+    ] {
+        if n > 0 {
+            text.push_str(&format!(", {n} {what}"));
         }
-    )
+    }
+    text
+}
+
+/// DDL that brings the target tables in line with the source tables.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct StructurePlan {
+    /// `CREATE TABLE` (without foreign keys) for missing tables, then `ALTER TABLE` for
+    /// changed ones, in run order.
+    pub statements: Vec<String>,
+    /// Foreign keys of created tables; they run last so that rows can be copied first.
+    pub deferred: Vec<String>,
+    /// Source tables created in the target.
+    pub created: Vec<String>,
+    /// Source tables whose target definition changes.
+    pub altered: Vec<String>,
+}
+
+/// Plans the structure step of a synchronisation: `source` tables (of `source_kind`) are
+/// created in or altered to match in `target` (of `target_kind`, in `target_schema`). Target
+/// tables that are not in `source` are left alone. Without `drop_columns`, target columns that
+/// are not in the source are kept, together with the indexes and foreign keys that use them.
+pub fn structure_plan(
+    source_kind: DatabaseKind,
+    source: &[TableSchema],
+    target_kind: DatabaseKind,
+    target: &[TableSchema],
+    target_schema: Option<&str>,
+    drop_columns: bool,
+) -> Result<StructurePlan, DbError> {
+    let mut plan = StructurePlan::default();
+    let mut alters = Vec::new();
+    for src in source {
+        let wanted = convert_table(source_kind, src, target_kind, target_schema);
+        match target
+            .iter()
+            .find(|t| t.name.eq_ignore_ascii_case(&src.name))
+        {
+            None => {
+                let without_fks = TableSchema {
+                    foreign_keys: Vec::new(),
+                    ..wanted.clone()
+                };
+                plan.statements
+                    .extend(rdbs_core::ddlgen::create_table(target_kind, &without_fks));
+                plan.deferred.extend(
+                    rdbs_core::diff::compare(
+                        target_kind,
+                        std::slice::from_ref(&wanted),
+                        target_kind,
+                        std::slice::from_ref(&without_fks),
+                        target_schema,
+                    )
+                    .into_iter()
+                    .flat_map(|d| d.statements),
+                );
+                plan.created.push(src.name.clone());
+            }
+            Some(existing) => {
+                // Compare against the target's own name (case may differ).
+                let mut wanted = TableSchema {
+                    name: existing.name.clone(),
+                    primary_key_name: existing
+                        .primary_key_name
+                        .clone()
+                        .or(wanted.primary_key_name),
+                    ..wanted
+                };
+                if !drop_columns {
+                    keep_target_columns(&mut wanted, existing);
+                }
+                let statements =
+                    rdbs_core::ddlgen::alter_table(target_kind, existing, &wanted, &[]).map_err(
+                        |e| DbError::new(DbErrorKind::Query, format!("{}: {}", src.name, e.0)),
+                    )?;
+                if !statements.is_empty() {
+                    alters.extend(statements);
+                    plan.altered.push(src.name.clone());
+                }
+            }
+        }
+    }
+    // New tables first, so that altered tables can reference them.
+    plan.statements.extend(alters);
+    Ok(plan)
+}
+
+/// Adds the target's columns that `wanted` lacks, and the indexes and foreign keys that use them.
+fn keep_target_columns(wanted: &mut TableSchema, target: &TableSchema) {
+    let extra: Vec<ColumnDef> = target
+        .columns
+        .iter()
+        .filter(|c| {
+            !wanted
+                .columns
+                .iter()
+                .any(|w| w.name.eq_ignore_ascii_case(&c.name))
+        })
+        .cloned()
+        .collect();
+    let uses_extra = |cols: &[String]| {
+        cols.iter()
+            .any(|c| extra.iter().any(|e| e.name.eq_ignore_ascii_case(c)))
+    };
+    for ix in &target.indexes {
+        if uses_extra(&ix.columns) && !wanted.indexes.iter().any(|w| w.name == ix.name) {
+            wanted.indexes.push(ix.clone());
+        }
+    }
+    for fk in &target.foreign_keys {
+        if uses_extra(&fk.columns) && !wanted.foreign_keys.iter().any(|w| w.name == fk.name) {
+            wanted.foreign_keys.push(fk.clone());
+        }
+    }
+    wanted.columns.extend(extra);
 }
 
 fn table_name(kind: DatabaseKind, t: &TableSchema) -> String {
@@ -103,9 +224,36 @@ fn literal(value: &CellValue, kind: DatabaseKind) -> String {
     sql_literal(value, kind)
 }
 
-/// Whether two values are equal for synchronisation purposes (numbers compare numerically).
+/// Date/time text without engine-specific decoration: `T` separator and trailing zero
+/// fractions (`2026-01-02T10:30:00.000000` → `2026-01-02 10:30:00`).
+fn normalize_temporal(text: &str) -> String {
+    let text = text.trim();
+    let text = if text.as_bytes().get(10) == Some(&b'T') {
+        text.replacen('T', " ", 1)
+    } else {
+        text.to_owned()
+    };
+    match text.rsplit_once('.') {
+        Some((head, fraction)) if fraction.bytes().all(|b| b.is_ascii_digit()) => {
+            match fraction.trim_end_matches('0') {
+                "" => head.to_owned(),
+                fraction => format!("{head}.{fraction}"),
+            }
+        }
+        _ => text,
+    }
+}
+
+/// Whether two values are equal for synchronisation purposes (numbers compare numerically,
+/// date/time values by their normalized text).
 fn same_value(a: &CellValue, b: &CellValue, kind: DatabaseKind) -> bool {
     if a == b {
+        return true;
+    }
+    if let (CellValue::Temporal(x), CellValue::Temporal(y) | CellValue::Text(y))
+    | (CellValue::Text(x), CellValue::Temporal(y)) = (a, b)
+        && normalize_temporal(x) == normalize_temporal(y)
+    {
         return true;
     }
     let (la, lb) = (literal(a, kind), literal(b, kind));
@@ -272,19 +420,71 @@ pub async fn run(
     // Sync deletions run last, referencing tables first: (summary index, statements).
     let mut pending_deletes: Vec<(usize, Vec<Change>)> = Vec::new();
 
+    let (copy_rows, structure) = match options.mode {
+        TransferMode::Sync {
+            scope,
+            drop_columns,
+            ..
+        } if scope.structure() => {
+            progress(Progress {
+                message: "Comparing table definitions…".into(),
+                fraction: 0.0,
+            });
+            let plan = structure_plan(
+                source_kind,
+                &ordered,
+                target_kind,
+                &target_tables,
+                target_schema.as_deref(),
+                drop_columns,
+            )?;
+            if !plan.statements.is_empty() {
+                progress(Progress {
+                    message: format!(
+                        "Changing table definitions: {} created, {} altered",
+                        plan.created.len(),
+                        plan.altered.len()
+                    ),
+                    fraction: 0.0,
+                });
+                let changes: Vec<Change> = plan
+                    .statements
+                    .iter()
+                    .cloned()
+                    .map(Change::unchecked)
+                    .collect();
+                run_changes(target, &changes).await?;
+                target_tables = target
+                    .describe_schema(options.target_schema.as_deref())
+                    .await?;
+            }
+            deferred_fks.extend(plan.deferred.iter().cloned());
+            (scope.data(), Some(plan))
+        }
+        _ => (true, None),
+    };
+
     for (index, src) in ordered.iter().enumerate() {
         if cancel.is_cancelled() {
             return Err(DbError::cancelled());
         }
         let fraction = index as f32 / total;
-        progress(Progress {
-            message: format!("{}: preparing", src.name),
-            fraction,
-        });
         let mut summary = TableSummary {
             table: src.name.clone(),
             ..TableSummary::default()
         };
+        if let Some(plan) = &structure {
+            summary.created = plan.created.contains(&src.name);
+            summary.altered = plan.altered.contains(&src.name);
+        }
+        if !copy_rows {
+            summaries.push(summary);
+            continue;
+        }
+        progress(Progress {
+            message: format!("{}: preparing", src.name),
+            fraction,
+        });
         let wanted = convert_table(source_kind, src, target_kind, target_schema.as_deref());
         let existing = target_tables
             .iter()
@@ -376,7 +576,7 @@ pub async fn run(
                 .any(|c| c.identity && dest_columns.contains(&c.name));
 
         match options.mode {
-            TransferMode::Sync { delete_missing } => {
+            TransferMode::Sync { delete_missing, .. } => {
                 let deletes = sync_table(
                     source,
                     source_kind,
@@ -725,6 +925,33 @@ mod tests {
             k
         ));
         assert!(same_value(&CellValue::Null, &CellValue::Null, k));
+        let t = |s: &str| CellValue::Temporal(s.into());
+        assert!(same_value(
+            &t("2025-12-31 23:59:59"),
+            &t("2025-12-31 23:59:59.000000"),
+            k
+        ));
+        assert!(same_value(
+            &t("2026-01-02T10:30:00.50"),
+            &CellValue::Text("2026-01-02 10:30:00.5".into()),
+            k
+        ));
+        assert!(!same_value(
+            &t("2026-01-02 10:30:00"),
+            &t("2026-01-02 10:30:01"),
+            k
+        ));
+        assert!(!same_value(
+            &t("2026-01-02 10:30:00.1"),
+            &t("2026-01-02 10:30:00.01"),
+            k
+        ));
+        // Plain text is not treated as a date.
+        assert!(!same_value(
+            &CellValue::Text("1.50".into()),
+            &CellValue::Text("1.5".into()),
+            k
+        ));
     }
 
     #[test]
@@ -735,7 +962,90 @@ mod tests {
             updated: 1,
             deleted: 0,
             created: true,
+            altered: false,
         }]);
         assert_eq!(s, "1 table(s): 3 inserted, 1 updated, 0 deleted, 1 created");
+        let s = summary_text(&[TableSummary {
+            table: "b".into(),
+            altered: true,
+            ..TableSummary::default()
+        }]);
+        assert_eq!(s, "1 table(s): 0 inserted, 0 updated, 0 deleted, 1 altered");
+    }
+
+    fn pg_table(name: &str, cols: &[&str]) -> TableSchema {
+        TableSchema {
+            schema: Some("public".into()),
+            name: name.into(),
+            columns: cols.iter().map(|c| ColumnDef::new(*c, "integer")).collect(),
+            primary_key: vec![cols[0].into()],
+            primary_key_name: Some(format!("{name}_pkey")),
+            ..TableSchema::default()
+        }
+    }
+
+    fn plan(source: &[TableSchema], target: &[TableSchema], drop_columns: bool) -> StructurePlan {
+        let pg = DatabaseKind::PostgreSql;
+        structure_plan(pg, source, pg, target, Some("public"), drop_columns).expect("plan")
+    }
+
+    #[test]
+    fn structure_creates_missing_tables_and_adds_columns() {
+        let mut orders = pg_table("orders", &["id", "customer_id"]);
+        orders.foreign_keys.push(ForeignKeyDef {
+            name: "fk_orders_customer".into(),
+            columns: vec!["customer_id".into()],
+            ref_schema: None,
+            ref_table: "customers".into(),
+            ref_columns: vec!["id".into()],
+        });
+        let source = [pg_table("customers", &["id", "age"]), orders];
+        let target = [pg_table("customers", &["id"])];
+        let p = plan(&source, &target, false);
+        assert_eq!(p.created, ["orders"]);
+        assert_eq!(p.altered, ["customers"]);
+        assert!(p.statements[0].starts_with("CREATE TABLE \"public\".\"orders\""));
+        assert!(!p.statements[0].contains("FOREIGN KEY"));
+        assert_eq!(
+            p.statements.last().map(String::as_str),
+            Some("ALTER TABLE \"public\".\"customers\" ADD COLUMN \"age\" integer")
+        );
+        assert_eq!(p.deferred.len(), 1);
+        assert!(p.deferred[0].contains("FOREIGN KEY (\"customer_id\")"));
+    }
+
+    #[test]
+    fn structure_keeps_or_drops_extra_target_columns() {
+        let source = [pg_table("t", &["id", "a"])];
+        let mut target = pg_table("t", &["id", "a", "extra"]);
+        target.indexes.push(rdbs_core::IndexDef::new(
+            "ix_extra",
+            vec!["extra".into()],
+            false,
+        ));
+        let target = [target];
+
+        let kept = plan(&source, &target, false);
+        assert!(kept.statements.is_empty(), "{:?}", kept.statements);
+        assert!(kept.altered.is_empty());
+
+        let dropped = plan(&source, &target, true);
+        assert_eq!(dropped.altered, ["t"]);
+        assert!(
+            dropped
+                .statements
+                .iter()
+                .any(|s| s == "ALTER TABLE \"public\".\"t\" DROP COLUMN \"extra\""),
+            "{:?}",
+            dropped.statements
+        );
+        assert!(dropped.statements.iter().any(|s| s.contains("ix_extra")));
+    }
+
+    #[test]
+    fn structure_leaves_identical_and_target_only_tables_alone() {
+        let source = [pg_table("same", &["id", "a"])];
+        let target = [pg_table("same", &["id", "a"]), pg_table("legacy", &["id"])];
+        assert_eq!(plan(&source, &target, true), StructurePlan::default());
     }
 }

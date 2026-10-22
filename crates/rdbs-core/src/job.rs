@@ -15,11 +15,19 @@ pub enum TransferMode {
     Replace,
     /// Drop and recreate the target table from the source definition, then insert.
     Recreate,
-    /// Make the target rows equal to the source by primary key: insert missing rows, update
-    /// changed ones and (optionally) delete rows that are not in the source.
+    /// Make the target equal to the source. The structure step creates missing tables and
+    /// alters existing ones (columns, keys, indexes); the data step inserts missing rows,
+    /// updates changed ones by primary key and (optionally) deletes rows that are not in the
+    /// source.
     Sync {
         /// Delete target rows missing from the source.
         delete_missing: bool,
+        /// Structure, data or both.
+        #[serde(default)]
+        scope: SyncScope,
+        /// Drop target columns (and their indexes and foreign keys) that are not in the source.
+        #[serde(default)]
+        drop_columns: bool,
     },
 }
 
@@ -30,8 +38,57 @@ impl TransferMode {
             TransferMode::Append => "Append rows",
             TransferMode::Replace => "Replace rows (delete, then insert)",
             TransferMode::Recreate => "Drop and recreate tables",
-            TransferMode::Sync { .. } => "Synchronize by primary key",
+            TransferMode::Sync { .. } => "Synchronize",
         }
+    }
+
+    /// Synchronisation of `scope` that keeps extra target rows and columns.
+    pub fn sync(scope: SyncScope) -> Self {
+        TransferMode::Sync {
+            delete_missing: false,
+            scope,
+            drop_columns: false,
+        }
+    }
+}
+
+/// What a synchronisation brings in line with the source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum SyncScope {
+    /// Tables and columns only; rows are not touched.
+    Structure,
+    /// Rows only, by primary key.
+    #[default]
+    Data,
+    /// Tables and columns first, then rows.
+    StructureAndData,
+}
+
+impl SyncScope {
+    /// All scopes, in UI order.
+    pub const ALL: [SyncScope; 3] = [
+        SyncScope::Structure,
+        SyncScope::Data,
+        SyncScope::StructureAndData,
+    ];
+
+    /// Label for the UI.
+    pub fn label(self) -> &'static str {
+        match self {
+            SyncScope::Structure => "Tables and columns",
+            SyncScope::Data => "Data only",
+            SyncScope::StructureAndData => "Tables, columns and data",
+        }
+    }
+
+    /// Whether table definitions are synchronised.
+    pub fn structure(self) -> bool {
+        matches!(self, SyncScope::Structure | SyncScope::StructureAndData)
+    }
+
+    /// Whether rows are synchronised.
+    pub fn data(self) -> bool {
+        matches!(self, SyncScope::Data | SyncScope::StructureAndData)
     }
 }
 
