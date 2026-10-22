@@ -191,6 +191,30 @@ pub enum UiAction {
     Status(StatusMessage),
     /// Toggle the explorer sidebar.
     ToggleSidebar,
+    /// Close one tab, all others or all of them.
+    CloseTabs(TabClose),
+}
+
+/// Which tabs a close request removes; tabs are identified by [`crate::workspace::Tab::key`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TabClose {
+    /// This tab.
+    One(u64),
+    /// Every tab except this one.
+    Others(u64),
+    /// Every tab.
+    All,
+}
+
+impl TabClose {
+    /// Whether the tab with `key` is closed.
+    pub fn closes(self, key: u64) -> bool {
+        match self {
+            TabClose::One(k) => key == k,
+            TabClose::Others(k) => key != k,
+            TabClose::All => true,
+        }
+    }
 }
 
 /// Backup schedules and the backup jobs in flight (owned by the app, shown by the tool tab).

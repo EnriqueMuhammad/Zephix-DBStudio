@@ -16,8 +16,8 @@ and Redis. Written in Rust (egui); runs on Windows, macOS and Linux as a single 
 - **Explorer**: every database of a server, DDL viewer, table designer (fields, keys, indexes,
   foreign keys).
 - **Tools**: CSV/Excel import, schema comparison with a migration script, ER diagram (SVG
-  export), data transfer and sync between servers, visual query builder, backups on demand or on
-  a schedule.
+  export), data transfer between servers, table sync (tables and columns, data, or both),
+  visual query builder, backups on demand or on a schedule.
 
 ## Install and run
 

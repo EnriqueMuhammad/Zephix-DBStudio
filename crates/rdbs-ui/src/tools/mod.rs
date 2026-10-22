@@ -162,6 +162,11 @@ pub enum ToolLaunch {
         /// Preselected source.
         source: Option<Scope>,
     },
+    /// The transfer tool set to synchronise tables, columns and data.
+    Sync {
+        /// Preselected source.
+        source: Option<Scope>,
+    },
     /// Visual query builder.
     Builder {
         /// Where the query runs.
@@ -213,6 +218,7 @@ impl ToolTab {
             ToolLaunch::Diff { source } => Tool::Diff(diff::Diff::new(source)),
             ToolLaunch::Er { scope } => Tool::Er(er::Er::new(scope)),
             ToolLaunch::Transfer { source } => Tool::Transfer(transfer::Transfer::new(source)),
+            ToolLaunch::Sync { source } => Tool::Transfer(transfer::Transfer::new_sync(source)),
             ToolLaunch::Builder { scope } => Tool::Builder(builder::Builder::new(scope)),
             ToolLaunch::Backup { scope } => Tool::Backup(backup::Backup::new(scope)),
         };
