@@ -127,6 +127,7 @@ fn command_name(command: &Command) -> &'static str {
         Command::Backup { .. } => "Backup",
         Command::Cancel { .. } => "Cancel",
         Command::TestConnection { .. } => "TestConnection",
+        Command::RunAgentJob { .. } => "RunAgentJob",
         Command::Shutdown => "Shutdown",
     }
 }
@@ -321,6 +322,19 @@ impl Worker {
                     let w = self.clone();
                     tokio::spawn(async move { w.load_database(profile, database, password).await });
                 }
+                Command::RunAgentJob {
+                    request_id,
+                    profile,
+                    password,
+                    job_name,
+                    action,
+                } => {
+                    let w = self.clone();
+                    tokio::spawn(async move {
+                        w.run_agent_job(request_id, profile, password, job_name, action)
+                            .await;
+                    });
+                }
                 Command::TestConnection {
                     request_id,
                     profile,
@@ -513,6 +527,78 @@ impl Worker {
         if let Some(adapter) = session.as_mut() {
             self.emit_objects(profile_id, adapter.as_mut()).await;
         }
+    }
+
+    /// Runs one Agent procedure, then reloads the tree so the explorer shows the new state.
+    ///
+    /// A failure to reload does not hide the procedure's own error. The status text is a
+    /// single sentence (permission, Agent stopped, already running, disabled, or the
+    /// server's message).
+    async fn run_agent_job(
+        &self,
+        request_id: RequestId,
+        profile: ConnectionProfile,
+        password: Option<String>,
+        job_name: String,
+        action: rdbs_core::agent::AgentJobAction,
+    ) {
+        let profile_id = profile.id;
+        let sql = rdbs_core::agent::action_sql(&job_name, &action);
+        let executed = self
+            .with_session(profile, None, password, move |adapter| {
+                Box::pin(async move { adapter.execute(&sql, CancelHandle::new()).await })
+            })
+            .await;
+        let refresh_error = match self.load_main_objects(profile_id).await {
+            Ok(Some(objects)) => {
+                self.emitter.emit(Event::ObjectsLoaded {
+                    profile_id,
+                    objects,
+                });
+                None
+            }
+            Ok(None) => None,
+            Err(error) => Some(error),
+        };
+        let result = match executed {
+            Ok(_) => {
+                let mut message = rdbs_core::agent::action_success(&job_name, &action);
+                if let Some(error) = refresh_error {
+                    message.push_str(&format!(" The explorer could not be refreshed: {error}."));
+                }
+                Ok(message)
+            }
+            Err(error) => Err(DbError::new(
+                error.kind,
+                rdbs_core::agent::action_failure(
+                    &job_name,
+                    &action,
+                    error.code.as_deref(),
+                    &error.message,
+                ),
+            )),
+        };
+        self.emitter.emit(Event::AgentJobFinished {
+            request_id,
+            profile_id,
+            result,
+        });
+    }
+
+    /// Reloads the main session's object tree without emitting. `Ok(None)` when there is
+    /// no session yet (the action connected and then the slot should exist; this is a guard).
+    async fn load_main_objects(
+        &self,
+        profile_id: ProfileId,
+    ) -> Result<Option<Vec<rdbs_core::DbObject>>, DbError> {
+        let Some(slot) = self.existing_slot(&(profile_id, None)) else {
+            return Ok(None);
+        };
+        let mut session = slot.lock().await;
+        let Some(adapter) = session.as_mut() else {
+            return Ok(None);
+        };
+        adapter.load_objects().await.map(Some)
     }
 
     async fn emit_objects(&self, profile_id: ProfileId, adapter: &mut dyn DatabaseAdapter) {
@@ -935,6 +1021,130 @@ mod tests {
             unreachable!()
         };
         assert!(!objects.is_empty());
+    }
+
+    #[test]
+    fn agent_job_stop_enable_and_start_refresh_the_tree() {
+        use rdbs_core::agent::AgentJobAction;
+        let h = handle();
+        let mut p = ConnectionProfile::new(DatabaseKind::SqlServer);
+        p.name = "agent".into();
+        h.send(Command::Connect {
+            profile: p.clone(),
+            password: None,
+        });
+        wait_for(&h, |e| matches!(e, Event::ObjectsLoaded { .. }));
+        let nightly = "Nightly index maintenance";
+
+        let stop = h.next_request_id();
+        h.send(Command::RunAgentJob {
+            request_id: stop,
+            profile: p.clone(),
+            password: None,
+            job_name: nightly.into(),
+            action: AgentJobAction::Stop,
+        });
+        let (message, tree) = agent_outcome(&h, stop);
+        assert!(message.contains("Stop requested"), "{message}");
+        assert!(
+            !job_detail(&tree, nightly).starts_with("running"),
+            "{message}"
+        );
+
+        let disable = h.next_request_id();
+        h.send(Command::RunAgentJob {
+            request_id: disable,
+            profile: p.clone(),
+            password: None,
+            job_name: nightly.into(),
+            action: AgentJobAction::SetEnabled(false),
+        });
+        let (message, tree) = agent_outcome(&h, disable);
+        assert!(message.contains("Disabled"), "{message}");
+        assert!(
+            job_detail(&tree, nightly).contains("disabled"),
+            "{}",
+            job_detail(&tree, nightly)
+        );
+
+        let start = h.next_request_id();
+        h.send(Command::RunAgentJob {
+            request_id: start,
+            profile: p.clone(),
+            password: None,
+            job_name: nightly.into(),
+            action: AgentJobAction::Start { step_name: None },
+        });
+        let (message, _) = agent_outcome(&h, start);
+        assert!(message.contains("disabled"), "{message}");
+
+        let enable = h.next_request_id();
+        h.send(Command::RunAgentJob {
+            request_id: enable,
+            profile: p.clone(),
+            password: None,
+            job_name: nightly.into(),
+            action: AgentJobAction::SetEnabled(true),
+        });
+        let (message, _) = agent_outcome(&h, enable);
+        assert!(message.contains("Enabled"), "{message}");
+
+        let start = h.next_request_id();
+        h.send(Command::RunAgentJob {
+            request_id: start,
+            profile: p,
+            password: None,
+            job_name: nightly.into(),
+            action: AgentJobAction::Start {
+                step_name: Some("Update statistics".into()),
+            },
+        });
+        let (message, tree) = agent_outcome(&h, start);
+        assert!(message.contains("Update statistics"), "{message}");
+        let detail = job_detail(&tree, nightly);
+        assert!(detail.starts_with("running"), "{detail}");
+        assert!(detail.contains("step Update statistics"), "{detail}");
+    }
+
+    /// Waits for the Agent action and the tree refresh that precedes it.
+    fn agent_outcome(
+        h: &ServiceHandle,
+        request_id: RequestId,
+    ) -> (String, Vec<rdbs_core::DbObject>) {
+        let deadline = Instant::now() + WAIT;
+        let mut tree = None;
+        while let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
+            match h.recv_timeout(remaining) {
+                Some(Event::ObjectsLoaded { objects, .. }) => tree = Some(objects),
+                Some(Event::AgentJobFinished {
+                    request_id: id,
+                    result,
+                    ..
+                }) if id == request_id => {
+                    let message = match result {
+                        Ok(message) => message,
+                        Err(error) => error.message,
+                    };
+                    return (
+                        message,
+                        tree.expect("tree refreshed before the action finished"),
+                    );
+                }
+                Some(_) => {}
+                None => break,
+            }
+        }
+        panic!("timed out waiting for the agent job action");
+    }
+
+    fn job_detail(objects: &[rdbs_core::DbObject], name: &str) -> String {
+        objects
+            .iter()
+            .find(|o| o.name == rdbs_core::agent::AGENT_FOLDER)
+            .and_then(|folder| folder.children.iter().find(|c| c.name == "Jobs"))
+            .and_then(|jobs| jobs.children.iter().find(|job| job.name == name))
+            .and_then(|job| job.detail.clone())
+            .unwrap_or_default()
     }
 
     #[test]

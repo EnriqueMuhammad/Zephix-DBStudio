@@ -86,6 +86,11 @@ enum Confirmation {
         tab_id: u64,
         rows: usize,
     },
+    AgentJob {
+        profile_id: ProfileId,
+        job_name: String,
+        action: rdbs_core::agent::AgentJobAction,
+    },
 }
 
 /// Finds a table node by database / schema / name in an explorer tree.
@@ -612,6 +617,12 @@ impl StudioApp {
                     self.record_history(entry);
                 }
             }
+            Event::AgentJobFinished { result, .. } => {
+                self.status = Some(match result {
+                    Ok(message) => StatusMessage::info(message),
+                    Err(error) => StatusMessage::error(error.message),
+                });
+            }
             Event::TestFinished { request_id, result } => {
                 if let Some(dialog) = &mut self.dialog
                     && matches!(dialog.test, TestState::Running(id) if id == request_id)
@@ -939,6 +950,15 @@ impl StudioApp {
                     self.apply(follow_up);
                 }
                 UiAction::ShowDdl(obj) => self.request_ddl(obj, false),
+                UiAction::RunAgentJob { obj, action } => self.request_agent_job(obj, action),
+                UiAction::ViewJobHistory(obj) => {
+                    self.apply(vec![UiAction::NewQuery {
+                        profile_id: Some(obj.profile_id),
+                        sql: Some(rdbs_core::agent::history_sql(&obj.name)),
+                        title: Some(format!("History · {}", obj.name)),
+                        run: true,
+                    }]);
+                }
                 UiAction::EditRoutine(obj) => self.request_ddl(obj, true),
                 UiAction::MoveConnection { id, target, below } => {
                     self.move_connection(id, target, below);
@@ -1312,6 +1332,60 @@ impl StudioApp {
         self.apply(follow_up);
     }
 
+    /// Confirms when the action requires it, then asks the worker to run the procedure.
+    fn request_agent_job(
+        &mut self,
+        obj: crate::model::ObjectRef,
+        action: rdbs_core::agent::AgentJobAction,
+    ) {
+        let Some(profile) = self.profile(obj.profile_id) else {
+            return;
+        };
+        if rdbs_core::agent::action_requires_confirmation(&action, profile.environment) {
+            self.confirm = Some(Confirmation::AgentJob {
+                profile_id: obj.profile_id,
+                job_name: obj.name,
+                action,
+            });
+            return;
+        }
+        self.send_agent_job(obj.profile_id, obj.name, action);
+    }
+
+    fn send_agent_job(
+        &mut self,
+        profile_id: ProfileId,
+        job_name: String,
+        action: rdbs_core::agent::AgentJobAction,
+    ) {
+        let Some(profile) = self.profile(profile_id).cloned() else {
+            return;
+        };
+        let progress = match &action {
+            rdbs_core::agent::AgentJobAction::Start {
+                step_name: Some(step),
+            } if !step.is_empty() => {
+                format!("Starting “{job_name}” at step “{step}”…")
+            }
+            rdbs_core::agent::AgentJobAction::Start { .. } => format!("Starting “{job_name}”…"),
+            rdbs_core::agent::AgentJobAction::Stop => format!("Stopping “{job_name}”…"),
+            rdbs_core::agent::AgentJobAction::SetEnabled(true) => {
+                format!("Enabling “{job_name}”…")
+            }
+            rdbs_core::agent::AgentJobAction::SetEnabled(false) => {
+                format!("Disabling “{job_name}”…")
+            }
+        };
+        self.status = Some(StatusMessage::info(progress));
+        self.services.send(Command::RunAgentJob {
+            request_id: self.services.next_request_id(),
+            profile,
+            password: self.session_passwords.get(&profile_id).cloned(),
+            job_name,
+            action,
+        });
+    }
+
     fn request_ddl(&mut self, obj: crate::model::ObjectRef, edit: bool) {
         let Some(profile) = self.profile(obj.profile_id).cloned() else {
             return;
@@ -1319,7 +1393,9 @@ impl StudioApp {
         let database = self.database_override(&obj, profile.kind);
         let request_id = self.services.next_request_id();
         let edit = edit.then(|| self.routine_target(&obj, profile.kind));
-        let title = if edit.is_some() {
+        let title = if obj.kind == rdbs_core::ObjectKind::AgentJob {
+            format!("Script · {}", obj.name)
+        } else if edit.is_some() {
             format!("Edit {}", obj.name)
         } else {
             format!("DDL · {}", obj.name)
@@ -2217,6 +2293,12 @@ impl StudioApp {
 
         let response = egui::Modal::new(Id::new("confirm-dialog")).show(ctx, |ui| {
             ui.set_width(480.0);
+            let agent_sql = match confirm {
+                Confirmation::AgentJob {
+                    job_name, action, ..
+                } => Some(rdbs_core::agent::action_sql(job_name, action)),
+                _ => None,
+            };
             let (title, body, confirm_label, preview) = match confirm {
                 Confirmation::Execute {
                     profile_id,
@@ -2231,7 +2313,7 @@ impl StudioApp {
                         name_of(*profile_id),
                         Environment::Production.label()
                     ),
-                    "Run on production",
+                    "Run on production".to_owned(),
                     Some(sql.as_str()),
                 ),
                 Confirmation::SaveEdits { rows, .. } => (
@@ -2240,13 +2322,13 @@ impl StudioApp {
                         "{rows} row(s) will be changed in a single transaction on a {} connection.",
                         Environment::Production.label()
                     ),
-                    "Save on production",
+                    "Save on production".to_owned(),
                     None,
                 ),
                 Confirmation::ClearHistory => (
                     format!("{}  Clear query history?", icon::TRASH),
                     "All recorded queries will be deleted. This cannot be undone.".to_owned(),
-                    "Clear history",
+                    "Clear history".to_owned(),
                     None,
                 ),
                 Confirmation::DeleteProfile(id) => (
@@ -2255,9 +2337,35 @@ impl StudioApp {
                         "“{}” will be removed from your saved connections. This cannot be undone.",
                         name_of(*id)
                     ),
-                    "Delete",
+                    "Delete".to_owned(),
                     None,
                 ),
+                Confirmation::AgentJob {
+                    profile_id,
+                    job_name,
+                    action,
+                } => {
+                    let production = profiles.iter().any(|p| {
+                        p.id == *profile_id && p.environment.requires_write_confirmation()
+                    });
+                    let prompt = rdbs_core::agent::action_prompt(
+                        job_name,
+                        action,
+                        &name_of(*profile_id),
+                        production,
+                    );
+                    let glyph = if production {
+                        icon::SHIELD_WARNING
+                    } else {
+                        icon::STOP
+                    };
+                    (
+                        format!("{glyph}  {}", prompt.title),
+                        prompt.body,
+                        prompt.confirm_label,
+                        agent_sql.as_deref(),
+                    )
+                }
             };
             ui.label(
                 RichText::new(title)
@@ -2327,6 +2435,11 @@ impl StudioApp {
                 }
             }
             Confirmation::DeleteProfile(id) => self.delete_profile(id),
+            Confirmation::AgentJob {
+                profile_id,
+                job_name,
+                action,
+            } => self.send_agent_job(profile_id, job_name, action),
             Confirmation::SaveEdits { tab_id, .. } => self.save_edits(tab_id, true),
             Confirmation::ClearHistory => {
                 if let Err(e) = self.store.clear_history() {

@@ -9,6 +9,7 @@
 //! transparently. Session state (temporary tables, open transactions, `SET` options) is lost,
 //! and the UI is told so.
 
+mod agent;
 mod batch;
 mod catalog;
 mod ddl;

@@ -146,7 +146,7 @@ pub async fn load(client: &mut MssqlClient) -> Result<Vec<DbObject>, DbError> {
             })
             .collect::<Vec<_>>(),
     );
-    Ok(databases
+    let mut tree: Vec<DbObject> = databases
         .iter()
         .map(|r| {
             let name = col(r, 0);
@@ -157,7 +157,10 @@ pub async fn load(client: &mut MssqlClient) -> Result<Vec<DbObject>, DbError> {
                 DbObject::new(name, ObjectKind::Database).with_detail(rdbs_core::schema::NOT_LOADED)
             }
         })
-        .collect())
+        .collect();
+    // Server-level, after the databases. A failure here is a notice, not a failed refresh.
+    tree.push(crate::agent::load_node(client).await);
+    Ok(tree)
 }
 
 #[cfg(test)]

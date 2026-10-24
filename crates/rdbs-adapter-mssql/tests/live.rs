@@ -544,3 +544,244 @@ async fn routines_can_be_edited_and_executed() {
         .await
         .expect("edit script runs");
 }
+
+const AGENT_JOB: &str = "zephix_it_agent_job";
+
+async fn delete_agent_job(s: &mut dyn DatabaseAdapter) {
+    let sql = format!(
+        "IF EXISTS (SELECT 1 FROM msdb.dbo.sysjobs WHERE name = N'{AGENT_JOB}') \
+         EXEC msdb.dbo.sp_delete_job @job_name = N'{AGENT_JOB}', @delete_unused_schedule = 1"
+    );
+    let _ = s.execute(&sql, CancelHandle::new()).await;
+}
+
+/// Creates a disabled job in msdb, reads it back, then enables, starts, stops and disables it.
+/// Requires SQL Server Agent (Developer/Standard/Enterprise; the compose file sets
+/// `MSSQL_AGENT_ENABLED`) and a running Agent service for start and stop.
+#[tokio::test]
+async fn agent_job_is_listed_and_scripted() {
+    use rdbs_core::schema::ObjectPath;
+    let Some(mut s) = session().await else { return };
+    delete_agent_job(s.as_mut()).await;
+    s.execute(
+        "EXEC msdb.dbo.sp_add_job \
+            @job_name = N'zephix_it_agent_job', @enabled = 0, \
+            @description = N'zephix it: O''Hare', @owner_login_name = N'sa'; \
+         EXEC msdb.dbo.sp_add_jobstep \
+            @job_name = N'zephix_it_agent_job', @step_name = N'wait', \
+            @subsystem = N'TSQL', @command = N'WAITFOR DELAY ''00:00:30''', \
+            @database_name = N'master', @on_success_action = 3; \
+         EXEC msdb.dbo.sp_add_jobstep \
+            @job_name = N'zephix_it_agent_job', @step_name = N'hello', \
+            @subsystem = N'TSQL', @command = N'SELECT 1 AS zephix_agent', \
+            @database_name = N'master'; \
+         EXEC msdb.dbo.sp_add_jobschedule \
+            @job_name = N'zephix_it_agent_job', @name = N'zephix_nightly', \
+            @enabled = 1, @freq_type = 4, @freq_interval = 1, \
+            @freq_subday_type = 1, @freq_subday_interval = 0, \
+            @freq_relative_interval = 0, @freq_recurrence_factor = 0, \
+            @active_start_date = 20261024, @active_end_date = 99991231, \
+            @active_start_time = 20000, @active_end_time = 235959; \
+         EXEC msdb.dbo.sp_add_jobserver \
+            @job_name = N'zephix_it_agent_job', @server_name = N'(LOCAL)';",
+        CancelHandle::new(),
+    )
+    .await
+    .expect(
+        "create sample Agent job (msdb.dbo.sysjobs must exist; \
+         set MSSQL_AGENT_ENABLED=true on the SQL Server container)",
+    );
+
+    let mut attempt = 0;
+    let tree = loop {
+        match s.load_objects().await {
+            Ok(tree) => break tree,
+            Err(e) if attempt < 3 => {
+                eprintln!("retrying load_objects after: {e}");
+                attempt += 1;
+                tokio::time::sleep(Duration::from_millis(300)).await;
+            }
+            Err(e) => panic!("objects: {e}"),
+        }
+    };
+    let agent = tree
+        .iter()
+        .find(|o| o.name == "SQL Server Agent")
+        .expect("SQL Server Agent node");
+    assert_ne!(
+        agent.detail.as_deref(),
+        Some("not available"),
+        "Agent node: {} / {:?}",
+        agent.detail.as_deref().unwrap_or(""),
+        agent.children.iter().map(|c| &c.name).collect::<Vec<_>>()
+    );
+    let job = agent
+        .children
+        .iter()
+        .find(|c| c.name == "Jobs")
+        .and_then(|folder| folder.children.iter().find(|j| j.name == AGENT_JOB))
+        .expect("sample job listed");
+    assert_eq!(job.kind, ObjectKind::AgentJob);
+    let detail = job.detail.as_deref().unwrap_or("");
+    assert!(detail.contains("disabled"), "{detail}");
+    assert!(detail.contains("sa"), "{detail}");
+    assert!(detail.contains("never run"), "{detail}");
+
+    let script = s
+        .object_ddl(&ObjectPath {
+            database: None,
+            schema: None,
+            name: AGENT_JOB.into(),
+            kind: ObjectKind::AgentJob,
+        })
+        .await
+        .expect("script job");
+    for part in [
+        "zephix_it_agent_job",
+        "O''Hare",
+        "SELECT 1 AS zephix_agent",
+        "zephix_nightly",
+        "@freq_type = 4",
+        "sp_add_jobstep",
+        "sp_add_jobschedule",
+        "@server_name = N'(LOCAL)'",
+    ] {
+        assert!(script.contains(part), "missing {part} in\n{script}");
+    }
+    assert!(!script.contains("sp_start_job"), "{script}");
+
+    let history = s
+        .execute(
+            &rdbs_core::agent::history_sql(AGENT_JOB),
+            CancelHandle::new(),
+        )
+        .await
+        .expect("job history");
+    let columns: Vec<&str> = history
+        .last_result()
+        .expect("history columns")
+        .columns
+        .iter()
+        .map(|c| c.name.as_str())
+        .collect();
+    assert!(columns.contains(&"step_id"), "{columns:?}");
+    assert!(columns.contains(&"message"), "{columns:?}");
+    assert!(columns.contains(&"outcome"), "{columns:?}");
+
+    use rdbs_core::agent::{AgentJobAction, action_sql};
+    let start = action_sql(AGENT_JOB, &AgentJobAction::Start { step_name: None });
+    let refused = s
+        .execute(&start, CancelHandle::new())
+        .await
+        .expect_err("a disabled job does not start");
+    assert!(
+        refused.to_string().to_lowercase().contains("disabled"),
+        "{refused}"
+    );
+
+    s.execute(
+        &action_sql(AGENT_JOB, &AgentJobAction::SetEnabled(true)),
+        CancelHandle::new(),
+    )
+    .await
+    .expect("enable job");
+    let detail = agent_job_detail(s.as_mut()).await;
+    assert!(detail.contains("enabled"), "{detail}");
+    assert!(!detail.starts_with("running"), "{detail}");
+
+    let start_at = action_sql(
+        AGENT_JOB,
+        &AgentJobAction::Start {
+            step_name: Some("wait".into()),
+        },
+    );
+    let mut started = false;
+    for _ in 0..20 {
+        match s.execute(&start_at, CancelHandle::new()).await {
+            Ok(_) => {
+                started = true;
+                break;
+            }
+            Err(error)
+                if error.to_string().contains("22022")
+                    || error
+                        .message
+                        .to_lowercase()
+                        .contains("sqlserveragent is not currently running") =>
+            {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+            Err(error) => panic!("start job: {error}"),
+        }
+    }
+    assert!(
+        started,
+        "SQL Server Agent did not accept sp_start_job. The compose file sets \
+         MSSQL_AGENT_ENABLED=true; the Agent service must be running."
+    );
+    let detail = wait_agent_detail(s.as_mut(), |detail| detail.starts_with("running")).await;
+    assert!(
+        detail.contains("step wait") || detail.starts_with("running"),
+        "{detail}"
+    );
+
+    s.execute(
+        &action_sql(AGENT_JOB, &AgentJobAction::Stop),
+        CancelHandle::new(),
+    )
+    .await
+    .expect("stop job");
+    let detail = wait_agent_detail(s.as_mut(), |detail| !detail.starts_with("running")).await;
+    assert!(detail.contains("enabled"), "{detail}");
+
+    s.execute(
+        &action_sql(AGENT_JOB, &AgentJobAction::SetEnabled(false)),
+        CancelHandle::new(),
+    )
+    .await
+    .expect("disable job");
+    let detail = agent_job_detail(s.as_mut()).await;
+    assert!(detail.contains("disabled"), "{detail}");
+    assert!(!detail.starts_with("running"), "{detail}");
+
+    s.execute("SELECT 1 AS still_open", CancelHandle::new())
+        .await
+        .expect("session still usable after changing an Agent job");
+    delete_agent_job(s.as_mut()).await;
+}
+
+async fn agent_job_detail(s: &mut dyn DatabaseAdapter) -> String {
+    let mut attempt = 0;
+    loop {
+        match s.load_objects().await {
+            Ok(tree) => {
+                return tree
+                    .iter()
+                    .find(|o| o.name == "SQL Server Agent")
+                    .and_then(|agent| agent.children.iter().find(|c| c.name == "Jobs"))
+                    .and_then(|jobs| jobs.children.iter().find(|j| j.name == AGENT_JOB))
+                    .and_then(|job| job.detail.clone())
+                    .unwrap_or_default();
+            }
+            Err(error) if attempt < 3 => {
+                eprintln!("retrying load_objects after: {error}");
+                attempt += 1;
+                tokio::time::sleep(Duration::from_millis(300)).await;
+            }
+            Err(error) => panic!("objects: {error}"),
+        }
+    }
+}
+
+async fn wait_agent_detail(s: &mut dyn DatabaseAdapter, pred: impl Fn(&str) -> bool) -> String {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut last = String::new();
+    while Instant::now() < deadline {
+        last = agent_job_detail(s).await;
+        if pred(&last) {
+            return last;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    panic!("job detail did not reach the expected state, last: {last}");
+}

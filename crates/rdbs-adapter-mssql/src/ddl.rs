@@ -21,6 +21,7 @@ pub async fn object_ddl(client: &mut MssqlClient, object: &ObjectPath) -> Result
     let id = format!("OBJECT_ID({})", lit(&two_part));
     match object.kind {
         ObjectKind::Table => table_ddl(client, &two_part, &id).await,
+        ObjectKind::AgentJob => crate::agent::script_job(client, &object.name).await,
         ObjectKind::View | ObjectKind::Procedure | ObjectKind::Function => {
             let rows = text_rows(client, &format!("SELECT OBJECT_DEFINITION({id})")).await?;
             let ddl = rows.first().map(|r| col(r, 0)).unwrap_or_default();

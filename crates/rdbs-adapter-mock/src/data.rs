@@ -474,7 +474,7 @@ pub fn sample_objects(kind: DatabaseKind) -> Vec<DbObject> {
         DatabaseKind::Oracle => &["APP", "HR"],
         _ => &[],
     };
-    databases
+    let mut tree: Vec<DbObject> = databases
         .iter()
         .map(|db| {
             let children = if schemas.is_empty() {
@@ -489,7 +489,156 @@ pub fn sample_objects(kind: DatabaseKind) -> Vec<DbObject> {
             };
             DbObject::new(*db, ObjectKind::Database).with_children(children)
         })
-        .collect()
+        .collect();
+    if kind == DatabaseKind::SqlServer {
+        tree.push(rdbs_core::agent::jobs_node(
+            &sample_agent_summaries(),
+            false,
+        ));
+    }
+    tree
+}
+
+/// Demo SQL Server Agent jobs, matching what a Developer edition would list.
+pub(crate) fn sample_agent_summaries() -> Vec<rdbs_core::agent::AgentJobSummary> {
+    use rdbs_core::agent::{AgentJobSummary, AgentStep};
+    vec![
+        AgentJobSummary {
+            name: "Nightly index maintenance".into(),
+            enabled: true,
+            owner: "sa".into(),
+            category: "Database Maintenance".into(),
+            last_outcome: Some(1),
+            last_run_date: Some(20261023),
+            last_run_time: Some(20_000),
+            next_run_date: Some(20261024),
+            next_run_time: Some(20_000),
+            running: true,
+            current_step: "Rebuild indexes".into(),
+            steps: vec![
+                AgentStep {
+                    id: 1,
+                    name: "Rebuild indexes".into(),
+                },
+                AgentStep {
+                    id: 2,
+                    name: "Update statistics".into(),
+                },
+            ],
+        },
+        AgentJobSummary {
+            name: "Failed backup".into(),
+            enabled: false,
+            owner: "sa".into(),
+            category: "Database Maintenance".into(),
+            last_outcome: Some(0),
+            last_run_date: Some(20261022),
+            last_run_time: Some(231_504),
+            next_run_date: None,
+            next_run_time: None,
+            running: false,
+            current_step: String::new(),
+            steps: vec![AgentStep {
+                id: 1,
+                name: "Run".into(),
+            }],
+        },
+    ]
+}
+
+/// Definition used when demo mode scripts an Agent job.
+pub fn sample_agent_job(name: &str) -> rdbs_core::agent::AgentJobDef {
+    use rdbs_core::agent::{AgentJobDef, AgentJobSchedule, AgentJobStep};
+    AgentJobDef {
+        name: name.to_owned(),
+        enabled: name != "Failed backup",
+        description: "Sample SQL Server Agent job (demo mode).".into(),
+        category: "Database Maintenance".into(),
+        owner: "sa".into(),
+        start_step_id: 1,
+        notify_level_eventlog: 0,
+        notify_level_email: 0,
+        notify_level_netsend: 0,
+        notify_level_page: 0,
+        delete_level: 0,
+        steps: vec![AgentJobStep {
+            step_id: 1,
+            name: "Run".into(),
+            subsystem: "TSQL".into(),
+            command: "SELECT 1 AS zephix_agent;".into(),
+            database_name: "master".into(),
+            database_user_name: String::new(),
+            success_code: 0,
+            on_success_action: 1,
+            on_success_step_id: 0,
+            on_fail_action: 2,
+            on_fail_step_id: 0,
+            retry_attempts: 0,
+            retry_interval: 0,
+            os_run_priority: 0,
+            flags: 0,
+            output_file_name: String::new(),
+        }],
+        schedules: vec![AgentJobSchedule {
+            name: "nightly".into(),
+            enabled: true,
+            freq_type: 4,
+            freq_interval: 1,
+            freq_subday_type: 1,
+            freq_subday_interval: 0,
+            freq_relative_interval: 0,
+            freq_recurrence_factor: 0,
+            active_start_date: 20261024,
+            active_end_date: 99991231,
+            active_start_time: 20000,
+            active_end_time: 235959,
+        }],
+    }
+}
+
+/// A few `sysjobhistory` rows, so demo mode's View History opens a real grid.
+pub fn sample_job_history() -> ResultSet {
+    let col = |name, ty| ColumnMeta::new(name, ty);
+    ResultSet {
+        columns: vec![
+            col("instance_id", "int"),
+            col("step_id", "int"),
+            col("step_name", "nvarchar"),
+            col("outcome", "nvarchar"),
+            col("run_time", "varchar"),
+            col("duration", "varchar"),
+            col("retries", "int"),
+            col("sql_severity", "int"),
+            col("sql_message_id", "int"),
+            col("message", "nvarchar"),
+        ],
+        rows: vec![
+            vec![
+                CellValue::Int(2),
+                CellValue::Int(0),
+                CellValue::Text("(Job outcome)".into()),
+                CellValue::Text("Failed".into()),
+                CellValue::Text("2026-10-22 23:15:04".into()),
+                CellValue::Text("00:00:12".into()),
+                CellValue::Int(0),
+                CellValue::Int(16),
+                CellValue::Int(50000),
+                CellValue::Text("The job failed. The step 1 message has the details.".into()),
+            ],
+            vec![
+                CellValue::Int(1),
+                CellValue::Int(1),
+                CellValue::Text("Run".into()),
+                CellValue::Text("Failed".into()),
+                CellValue::Text("2026-10-22 23:15:04".into()),
+                CellValue::Text("00:00:12".into()),
+                CellValue::Int(0),
+                CellValue::Int(16),
+                CellValue::Int(50000),
+                CellValue::Text("Backup device is offline. The statement was aborted.".into()),
+            ],
+        ],
+    }
 }
 
 #[cfg(test)]
@@ -509,5 +658,40 @@ mod tests {
         assert_eq!(pg[0].children[0].kind, ObjectKind::Schema);
         let my = sample_objects(DatabaseKind::MySql);
         assert_eq!(my[0].children[0].kind, ObjectKind::Folder);
+    }
+
+    #[test]
+    fn sql_server_lists_agent_jobs() {
+        let tree = sample_objects(DatabaseKind::SqlServer);
+        let agent = tree
+            .iter()
+            .find(|o| o.name == rdbs_core::agent::AGENT_FOLDER)
+            .expect("agent folder");
+        let jobs = &agent.children[0];
+        assert_eq!(jobs.name, rdbs_core::agent::JOBS_FOLDER);
+        assert!(
+            jobs.children
+                .iter()
+                .any(|j| j.kind == ObjectKind::AgentJob && j.name == "Failed backup")
+        );
+        let nightly = jobs
+            .children
+            .iter()
+            .find(|j| j.name == "Nightly index maintenance")
+            .expect("nightly");
+        assert!(
+            nightly
+                .detail
+                .as_deref()
+                .unwrap_or("")
+                .starts_with("running")
+        );
+        assert!(nightly.notes.iter().any(|n| n == "running"));
+        assert!(
+            tree.iter()
+                .filter(|o| o.kind == ObjectKind::Database)
+                .count()
+                >= 1
+        );
     }
 }

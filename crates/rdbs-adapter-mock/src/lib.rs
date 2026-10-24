@@ -10,6 +10,9 @@
 //! - `FROM orders` returns order rows, anything else returns customer rows;
 //! - text containing `sleep` or `waitfor` runs for ~10 s (to try cancellation);
 //! - text containing `error` fails with an engine-specific syntax error;
+//! - a read of `sysjobhistory` returns a sample Agent job history;
+//! - `sp_start_job`, `sp_stop_job` and `sp_update_job @enabled` change the sample Agent jobs
+//!   so a refresh shows the new state;
 //! - a host containing `fail` makes the connection attempt fail.
 
 mod data;
@@ -79,6 +82,11 @@ impl AdapterFactory for MockAdapterFactory {
                 kind: profile.kind,
                 version: server_version(profile.kind).to_owned(),
                 query_latency: self.query_latency,
+                jobs: if profile.kind == DatabaseKind::SqlServer {
+                    data::sample_agent_summaries()
+                } else {
+                    Vec::new()
+                },
             });
             Ok(adapter)
         })
@@ -91,6 +99,70 @@ pub struct MockAdapter {
     kind: DatabaseKind,
     version: String,
     query_latency: Duration,
+    /// SQL Server Agent jobs for this session. Start, stop and enable change them.
+    jobs: Vec<rdbs_core::agent::AgentJobSummary>,
+}
+
+impl MockAdapter {
+    /// Applies a start, stop or enable statement to the session's sample jobs.
+    fn apply_agent_action(
+        &mut self,
+        job_name: &str,
+        action: &rdbs_core::agent::AgentJobAction,
+    ) -> Result<QueryOutcome, DbError> {
+        use rdbs_core::agent::AgentJobAction;
+        let Some(job) = self.jobs.iter_mut().find(|job| job.name == job_name) else {
+            return Err(DbError::new(
+                DbErrorKind::Query,
+                format!("The specified @job_name ('{job_name}') does not exist."),
+            )
+            .with_code("14262"));
+        };
+        match action {
+            AgentJobAction::Start { step_name } => {
+                if !job.enabled {
+                    return Err(DbError::new(
+                        DbErrorKind::Query,
+                        format!(
+                            "Request to run job {job_name} refused because the job is disabled."
+                        ),
+                    )
+                    .with_code("14222"));
+                }
+                if job.running {
+                    return Err(DbError::new(
+                        DbErrorKind::Query,
+                        format!(
+                            "Request to run job {job_name} refused because the job is already running."
+                        ),
+                    ));
+                }
+                job.running = true;
+                job.current_step = step_name
+                    .clone()
+                    .filter(|step| !step.is_empty())
+                    .or_else(|| job.steps.first().map(|step| step.name.clone()))
+                    .unwrap_or_default();
+            }
+            AgentJobAction::Stop => {
+                if !job.running {
+                    return Err(DbError::new(
+                        DbErrorKind::Query,
+                        format!(
+                            "Request to stop job {job_name} refused because the job is not currently running."
+                        ),
+                    ));
+                }
+                job.running = false;
+                job.current_step.clear();
+            }
+            AgentJobAction::SetEnabled(enabled) => job.enabled = *enabled,
+        }
+        Ok(QueryOutcome {
+            messages: vec![rdbs_core::agent::action_success(job_name, action)],
+            ..QueryOutcome::default()
+        })
+    }
 }
 
 fn server_version(kind: DatabaseKind) -> &'static str {
@@ -139,7 +211,12 @@ impl DatabaseAdapter for MockAdapter {
     fn load_objects(&mut self) -> BoxFuture<'_, Result<Vec<DbObject>, DbError>> {
         Box::pin(async move {
             tokio::time::sleep(self.query_latency / 2).await;
-            Ok(sample_objects(self.kind))
+            let mut tree = sample_objects(self.kind);
+            if self.kind == DatabaseKind::SqlServer {
+                tree.retain(|object| object.name != rdbs_core::agent::AGENT_FOLDER);
+                tree.push(rdbs_core::agent::jobs_node(&self.jobs, false));
+            }
+            Ok(tree)
         })
     }
 
@@ -196,6 +273,11 @@ impl DatabaseAdapter for MockAdapter {
     ) -> BoxFuture<'a, Result<String, DbError>> {
         Box::pin(async move {
             tokio::time::sleep(self.query_latency / 2).await;
+            if object.kind == rdbs_core::ObjectKind::AgentJob {
+                return Ok(rdbs_core::agent::create_script(&data::sample_agent_job(
+                    &object.name,
+                )));
+            }
             if object.kind == rdbs_core::ObjectKind::Table {
                 let table = sample_tables(self.kind, object.schema.as_deref())
                     .into_iter()
@@ -240,6 +322,10 @@ impl DatabaseAdapter for MockAdapter {
         cancel: CancelHandle,
     ) -> BoxFuture<'a, Result<QueryOutcome, DbError>> {
         Box::pin(async move {
+            if let Some((job_name, action)) = rdbs_core::agent::parse_action_sql(sql_text) {
+                return self.apply_agent_action(&job_name, &action);
+            }
+
             let lower = sql_text.to_lowercase();
             let latency = if lower.contains("sleep") || lower.contains("waitfor") {
                 Duration::from_secs(10)
@@ -258,6 +344,12 @@ impl DatabaseAdapter for MockAdapter {
                     ..QueryOutcome::default()
                 }),
                 StatementKind::Read => {
+                    if lower.contains("sysjobhistory") {
+                        return Ok(QueryOutcome {
+                            results: vec![data::sample_job_history()],
+                            ..QueryOutcome::default()
+                        });
+                    }
                     // Paged reads (`OFFSET n`) see a table of DEFAULT_ROWS rows.
                     let limit = requested_rows(sql_text)
                         .unwrap_or(DEFAULT_ROWS)
@@ -440,6 +532,61 @@ mod tests {
             Some(7)
         );
         assert_eq!(requested_rows("select * from t"), None);
+    }
+
+    #[tokio::test]
+    async fn agent_actions_change_the_sample_jobs() {
+        use rdbs_core::agent::{AgentJobAction, action_sql};
+        let mut s = session(DatabaseKind::SqlServer).await;
+        let nightly = "Nightly index maintenance";
+        let start = action_sql(nightly, &AgentJobAction::Start { step_name: None });
+        let err = s.execute(&start, CancelHandle::new()).await.unwrap_err();
+        assert!(
+            err.message.to_lowercase().contains("already running"),
+            "{err}"
+        );
+
+        s.execute(
+            &action_sql(nightly, &AgentJobAction::Stop),
+            CancelHandle::new(),
+        )
+        .await
+        .unwrap();
+        s.execute(
+            &action_sql(nightly, &AgentJobAction::SetEnabled(false)),
+            CancelHandle::new(),
+        )
+        .await
+        .unwrap();
+        let err = s.execute(&start, CancelHandle::new()).await.unwrap_err();
+        assert!(err.message.to_lowercase().contains("disabled"), "{err}");
+        s.execute(
+            &action_sql(nightly, &AgentJobAction::SetEnabled(true)),
+            CancelHandle::new(),
+        )
+        .await
+        .unwrap();
+        s.execute(
+            &action_sql(
+                nightly,
+                &AgentJobAction::Start {
+                    step_name: Some("Update statistics".into()),
+                },
+            ),
+            CancelHandle::new(),
+        )
+        .await
+        .unwrap();
+        let tree = s.load_objects().await.unwrap();
+        let detail = tree
+            .iter()
+            .find(|o| o.name == rdbs_core::agent::AGENT_FOLDER)
+            .and_then(|folder| folder.children.iter().find(|c| c.name == "Jobs"))
+            .and_then(|jobs| jobs.children.iter().find(|j| j.name == nightly))
+            .and_then(|job| job.detail.clone())
+            .unwrap_or_default();
+        assert!(detail.starts_with("running"), "{detail}");
+        assert!(detail.contains("step Update statistics"), "{detail}");
     }
 
     #[tokio::test]
