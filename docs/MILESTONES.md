@@ -91,7 +91,7 @@ RDBS_IT=1 cargo test --workspace
 | `rdbs-services` | Integration | Worker with mock factory: connect → objects loaded, execute → finished, cancel → cancelled. |
 | `rdbs-transfer` | Unit + integration | Import, transfer/sync and backup→restore round trips (SQLite always; servers with `RDBS_IT=1`). |
 | `rdbs-adapter-{sqlite,redis,mongodb,oracle}` | Unit + integration | SQLite tests use temp files; Redis/MongoDB containers in the compose file; Oracle opt-in (`--profile oracle`, `RDBS_ORACLE=1`). |
-| `rdbs-adapter-{postgres,mysql,mssql}` | Unit + integration (opt-in) | Value/type mapping and script handling are unit-tested offline. `tests/live.rs` runs against `dev/docker-compose.yml` (`postgres:17`, `mysql:8.4`, `mssql/server:2022` with `MSSQL_AGENT_ENABLED`) only when `RDBS_IT=1`. The SQL Server suite includes a read-only Agent job round trip. |
+| `rdbs-adapter-{postgres,mysql,mssql}` | Unit + integration (opt-in) | Value/type mapping and script handling are unit-tested offline. `tests/live.rs` runs against `dev/docker-compose.yml` (`postgres:17`, `mysql:8.4`, `mssql/server:2022` with `MSSQL_AGENT_ENABLED`) only when `RDBS_IT=1`. The SQL Server suite lists, scripts, starts, stops, enables and disables a sample Agent job. |
 | `rdbs-ui` | Logic unit tests + manual checklist | Pure helpers (formatting, selection → byte range) unit-tested; visual behaviour verified with the checklist above. egui_kittest snapshot tests are a later option. |
 
 ## Dependency & licence review (M1)

@@ -1,4 +1,5 @@
-//! Read SQL Server Agent jobs from `msdb` without changing them.
+//! Read SQL Server Agent jobs from `msdb`, and run the start/stop/enable statements
+//! the worker sends. Creating or editing a job's steps is still a script the user runs.
 //!
 //! The probe uses catalog functions that return NULL instead of raising an error, so Express,
 //! a stopped or missing Agent, and a login without `SQLAgentReaderRole` do not surface as
@@ -175,11 +176,73 @@ async fn list_summaries(client: &mut MssqlClient) -> Result<Vec<AgentJobSummary>
          ORDER BY j.name",
     )
     .await?;
-    Ok(rows
+    let mut jobs: Vec<AgentJobSummary> = rows
         .iter()
         .filter_map(|row| AgentJobSummary::from_columns(row))
-        .collect())
+        .collect();
+    match text_rows(client, ACTIVITY_SQL).await {
+        Ok(activity) => {
+            for row in activity {
+                let name = col(&row, 0);
+                if let Some(job) = jobs.iter_mut().find(|job| job.name == name) {
+                    job.apply_activity(col(&row, 1) == "1", &col(&row, 2), &col(&row, 3));
+                }
+            }
+        }
+        Err(error) => {
+            tracing::debug!("SQL Server Agent activity was not read: {error}");
+        }
+    }
+    Ok(jobs)
 }
+
+/// Running state and step names. Separate from the job list so a missing permission
+/// on `sysjobactivity` does not hide jobs the login can already see.
+const ACTIVITY_SQL: &str = "\
+SELECT j.name,
+       CONVERT(nvarchar(10), CASE
+           WHEN act.start_execution_date IS NOT NULL AND act.stop_execution_date IS NULL THEN 1
+           ELSE 0
+       END),
+       COALESCE(cur.step_name, start_step.step_name, N''),
+       COALESCE(steps.packed, N'')
+FROM msdb.dbo.sysjobs AS j
+OUTER APPLY (
+    SELECT TOP (1) a.start_execution_date, a.stop_execution_date
+    FROM msdb.dbo.sysjobactivity AS a
+    WHERE a.job_id = j.job_id
+      AND a.session_id = (SELECT MAX(session_id) FROM msdb.dbo.syssessions)
+    ORDER BY a.start_execution_date DESC
+) AS act
+OUTER APPLY (
+    SELECT TOP (1) h.step_name
+    FROM msdb.dbo.sysjobhistory AS h
+    WHERE h.job_id = j.job_id
+      AND h.run_status = 4
+      AND act.start_execution_date IS NOT NULL
+      AND act.stop_execution_date IS NULL
+    ORDER BY h.instance_id DESC
+) AS cur
+OUTER APPLY (
+    SELECT TOP (1) s.step_name
+    FROM msdb.dbo.sysjobsteps AS s
+    WHERE s.job_id = j.job_id
+      AND s.step_id = j.start_step_id
+      AND act.start_execution_date IS NOT NULL
+      AND act.stop_execution_date IS NULL
+      AND cur.step_name IS NULL
+) AS start_step
+OUTER APPLY (
+    SELECT STUFF((
+        SELECT NCHAR(31) + CONVERT(nvarchar(10), s.step_id) + NCHAR(31)
+             + REPLACE(s.step_name, NCHAR(31), N' ')
+        FROM msdb.dbo.sysjobsteps AS s
+        WHERE s.job_id = j.job_id
+        ORDER BY s.step_id
+        FOR XML PATH(''), TYPE
+    ).value('.', 'nvarchar(max)'), 1, 1, N'') AS packed
+) AS steps
+ORDER BY j.name";
 
 fn nlit(value: &str) -> String {
     format!("N'{}'", value.replace('\'', "''"))

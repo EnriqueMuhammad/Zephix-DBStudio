@@ -194,6 +194,21 @@ pub enum Command {
         /// What to dump and where.
         options: crate::job::BackupOptions,
     },
+    /// Start, stop, enable or disable a SQL Server Agent job, then reload the object tree.
+    ///
+    /// The UI confirms this on production connections, and confirms Stop on every connection.
+    RunAgentJob {
+        /// Correlation id.
+        request_id: RequestId,
+        /// Target connection.
+        profile: ConnectionProfile,
+        /// Password entered for this session; `None` uses the credential store.
+        password: Option<String>,
+        /// `sysjobs.name`.
+        job_name: String,
+        /// What to run. Not a step or schedule edit.
+        action: crate::agent::AgentJobAction,
+    },
     /// Cancel a running [`Command::Execute`] or background job.
     Cancel {
         /// Request to cancel.
@@ -344,6 +359,16 @@ pub enum Event {
         /// Correlation id.
         request_id: RequestId,
         /// Outcome.
+        result: Result<String, DbError>,
+    },
+    /// A SQL Server Agent job action finished. `Ok` is a sentence for the status bar.
+    /// The object tree is refreshed with [`Event::ObjectsLoaded`] before this event.
+    AgentJobFinished {
+        /// Correlation id.
+        request_id: RequestId,
+        /// Connection the job belongs to.
+        profile_id: ProfileId,
+        /// Outcome. The error message is already a single sentence.
         result: Result<String, DbError>,
     },
     /// A connection test finished; `Ok` carries the server version.

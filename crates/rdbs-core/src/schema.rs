@@ -29,7 +29,8 @@ pub enum ObjectKind {
     Column,
     /// An index.
     Index,
-    /// A SQL Server Agent job (`msdb.dbo.sysjobs`). Read-only in the explorer.
+    /// A SQL Server Agent job (`msdb.dbo.sysjobs`). The explorer can start, stop,
+    /// enable and disable it. Steps and schedules are not edited here.
     AgentJob,
     /// An informational leaf, such as why SQL Server Agent could not be read.
     Notice,
@@ -57,6 +58,10 @@ pub struct DbObject {
     pub detail: Option<String>,
     /// Child objects.
     pub children: Vec<DbObject>,
+    /// Labels the explorer does not draw. SQL Server Agent jobs record enabled,
+    /// running and each step here so the context menu does not need another query.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<String>,
 }
 
 impl DbObject {
@@ -67,6 +72,7 @@ impl DbObject {
             kind,
             detail: None,
             children: Vec::new(),
+            notes: Vec::new(),
         }
     }
 

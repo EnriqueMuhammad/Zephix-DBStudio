@@ -1,14 +1,17 @@
-//! Read-only SQL Server Agent jobs.
+//! SQL Server Agent jobs.
 //!
 //! The explorer shows one **SQL Server Agent → Jobs** node per SQL Server connection.
 //! [`history_sql`] is the statement a history tab runs; [`create_script`] is the T-SQL a
-//! "Script Job as CREATE" tab shows. Neither is executed by Zephix.
+//! "Script Job as CREATE" tab shows and does not run.
 //!
-//! Writing is intentionally absent. A later phase can call `msdb.dbo.sp_start_job`,
-//! `msdb.dbo.sp_stop_job` and `msdb.dbo.sp_update_job` (enable, disable, edit) through the
-//! worker. Those change server state, so the UI must confirm them on production connections
-//! the same way it confirms other writes.
+//! [`action_sql`] is what Start, Stop, Enable and Disable run (`sp_start_job`,
+//! `sp_stop_job`, `sp_update_job`). Those change server state. [`action_requires_confirmation`]
+//! is the rule the UI applies: every action on a production connection, and Stop on any
+//! connection because it interrupts a running job. Editing steps and schedules is not
+//! supported. Zephix has no read-only connection flag; the server still enforces
+//! `SQLAgentOperatorRole` (or ownership via `SQLAgentUserRole`).
 
+use crate::profile::Environment;
 use crate::schema::{DbObject, ObjectKind};
 
 /// Explorer folder that holds Agent jobs for one server.
@@ -52,19 +55,51 @@ pub struct AgentJobSummary {
     pub next_run_date: Option<i32>,
     /// Matching `next_run_time`.
     pub next_run_time: Option<i32>,
+    /// A session in `sysjobactivity` has started and not stopped.
+    pub running: bool,
+    /// Step name while [`Self::running`] (from an in-progress history row, or the start step).
+    pub current_step: String,
+    /// Steps, in `step_id` order, for "Start at step".
+    pub steps: Vec<AgentStep>,
+}
+
+/// One job step the explorer can start at. Not a full step definition.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentStep {
+    /// `sysjobsteps.step_id`, starting at 1.
+    pub id: i32,
+    /// `sysjobsteps.step_name`.
+    pub name: String,
+}
+
+/// What the explorer can ask SQL Server Agent to do. Not step or schedule edits.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentJobAction {
+    /// `msdb.dbo.sp_start_job`. `step_name` is `@step_name` when starting at a step.
+    Start {
+        /// Empty means the job's own start step.
+        step_name: Option<String>,
+    },
+    /// `msdb.dbo.sp_stop_job`. Interrupts a running job.
+    Stop,
+    /// `msdb.dbo.sp_update_job @enabled`.
+    SetEnabled(bool),
 }
 
 impl AgentJobSummary {
     /// Parses one row of the explorer query.
     ///
     /// Columns: name, enabled (`0`/`1` or `true`/`false`), owner, category, last outcome,
-    /// last run date, last run time, next run date, next run time. Empty cells are missing.
-    /// A date of `0` (Agent has not computed a next run) is treated as missing.
+    /// last run date, last run time, next run date, next run time. Optional trailing columns
+    /// are running (`0`/`1`), the current step name, and the packed step list from
+    /// [`parse_step_list`]. Empty cells are missing. A date of `0` (Agent has not computed
+    /// a next run) is treated as missing.
     pub fn from_columns(row: &[Option<String>]) -> Option<Self> {
         let name = cell(row, 0);
         if name.is_empty() {
             return None;
         }
+        let running = cell_flag(row, 9);
         Some(Self {
             name,
             enabled: cell_flag(row, 1),
@@ -75,7 +110,28 @@ impl AgentJobSummary {
             last_run_time: cell_i32(row, 6),
             next_run_date: nonzero(cell_i32(row, 7)),
             next_run_time: cell_i32(row, 8),
+            running,
+            current_step: if running {
+                cell(row, 10)
+            } else {
+                String::new()
+            },
+            steps: parse_step_list(&cell(row, 11)),
         })
+    }
+
+    /// Fills running state and the step list from a follow-up query.
+    ///
+    /// The follow-up is separate so a login that can read `sysjobs` but not
+    /// `sysjobactivity` still sees the job list.
+    pub fn apply_activity(&mut self, running: bool, current_step: &str, packed_steps: &str) {
+        self.running = running;
+        self.current_step = if running {
+            current_step.to_owned()
+        } else {
+            String::new()
+        };
+        self.steps = parse_step_list(packed_steps);
     }
 }
 
@@ -314,9 +370,15 @@ pub fn format_agent_datetime(date: i32, time: i32) -> Option<String> {
     ))
 }
 
-/// Dimmed text next to a job name: state, owner, category, last outcome, next run.
+/// Dimmed text next to a job name: running step, enabled state, owner, category, last outcome, next run.
 pub fn job_detail(job: &AgentJobSummary) -> String {
     let mut parts = Vec::new();
+    if job.running {
+        parts.push("running".to_owned());
+        if !job.current_step.is_empty() {
+            parts.push(format!("step {}", job.current_step));
+        }
+    }
     parts.push(if job.enabled { "enabled" } else { "disabled" }.to_owned());
     if !job.owner.is_empty() {
         parts.push(job.owner.clone());
@@ -349,7 +411,10 @@ pub fn jobs_node(jobs: &[AgentJobSummary], service_stopped: bool) -> DbObject {
         .iter()
         .filter(|job| !job.name.trim().is_empty())
         .map(|job| {
-            DbObject::new(job.name.clone(), ObjectKind::AgentJob).with_detail(job_detail(job))
+            let mut node =
+                DbObject::new(job.name.clone(), ObjectKind::AgentJob).with_detail(job_detail(job));
+            node.notes = job_notes(job, service_stopped);
+            node
         })
         .collect::<Vec<_>>();
     let empty = children.is_empty();
@@ -404,6 +469,348 @@ INNER JOIN msdb.dbo.sysjobs AS j ON j.job_id = h.job_id
 WHERE j.name = {name}
 ORDER BY h.instance_id DESC;"
     )
+}
+
+/// Decodes the step list column: `id` + unit separator + `name`, repeated.
+///
+/// A unit separator inside a step name is not representable and is dropped by the query.
+pub fn parse_step_list(packed: &str) -> Vec<AgentStep> {
+    let mut parts = packed.split('\u{1f}').filter(|part| !part.is_empty());
+    let mut steps = Vec::new();
+    while let Some(id) = parts.next() {
+        let Some(name) = parts.next() else { break };
+        let Ok(id) = id.parse::<i32>() else { continue };
+        if name.is_empty() {
+            continue;
+        }
+        steps.push(AgentStep {
+            id,
+            name: name.to_owned(),
+        });
+    }
+    steps
+}
+
+/// Notes stored on an [`ObjectKind::AgentJob`] node. See [`job_controls`].
+pub fn job_notes(job: &AgentJobSummary, agent_stopped: bool) -> Vec<String> {
+    let mut notes = vec![if job.enabled {
+        "enabled".to_owned()
+    } else {
+        "disabled".to_owned()
+    }];
+    if job.running {
+        notes.push("running".to_owned());
+    }
+    if agent_stopped {
+        notes.push("agent-stopped".to_owned());
+    }
+    if !job.current_step.is_empty() {
+        notes.push(format!("step\t{}", job.current_step));
+    }
+    for step in &job.steps {
+        notes.push(format!("item\t{}\t{}", step.id, step.name));
+    }
+    notes
+}
+
+/// Which job actions the explorer offers, from [`job_notes`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JobControls {
+    /// Start is clickable.
+    pub can_start: bool,
+    /// Shown when Start is disabled.
+    pub start_reason: &'static str,
+    /// Stop is in the menu (the job is running, or was when the tree was loaded).
+    pub show_stop: bool,
+    /// Stop is clickable. False when Agent itself is stopped.
+    pub can_stop: bool,
+    /// Shown when Stop is visible but disabled.
+    pub stop_reason: &'static str,
+    /// `Some(true)` offers Enable, `Some(false)` offers Disable.
+    pub set_enabled: Option<bool>,
+    /// Steps for "Start at step", in order.
+    pub steps: Vec<AgentStep>,
+}
+
+/// Menu state for one job node. Unknown notes hide the write actions.
+pub fn job_controls(notes: &[String]) -> JobControls {
+    let enabled = notes.iter().any(|n| n == "enabled");
+    let disabled = notes.iter().any(|n| n == "disabled");
+    let running = notes.iter().any(|n| n == "running");
+    let agent_stopped = notes.iter().any(|n| n == "agent-stopped");
+    let steps = notes
+        .iter()
+        .filter_map(|note| {
+            let mut parts = note.splitn(3, '\t');
+            if parts.next()? != "item" {
+                return None;
+            }
+            let id = parts.next()?.parse().ok()?;
+            let name = parts.next()?.to_owned();
+            if name.is_empty() {
+                None
+            } else {
+                Some(AgentStep { id, name })
+            }
+        })
+        .collect();
+    let known = enabled || disabled;
+    let can_start = known && enabled && !running && !agent_stopped;
+    let start_reason = if !known {
+        "This job cannot be changed from here."
+    } else if agent_stopped {
+        "SQL Server Agent is stopped."
+    } else if running {
+        "The job is already running."
+    } else if !enabled {
+        "Enable the job before starting it."
+    } else {
+        ""
+    };
+    JobControls {
+        can_start,
+        start_reason,
+        show_stop: running,
+        can_stop: running && !agent_stopped,
+        stop_reason: if agent_stopped {
+            "SQL Server Agent is stopped."
+        } else {
+            ""
+        },
+        set_enabled: if !known {
+            None
+        } else if enabled {
+            Some(false)
+        } else {
+            Some(true)
+        },
+        steps,
+    }
+}
+
+/// Production connections confirm every action. Stop also confirms on development and
+/// staging, because it interrupts a running job.
+pub fn action_requires_confirmation(action: &AgentJobAction, environment: Environment) -> bool {
+    matches!(action, AgentJobAction::Stop) || environment.requires_write_confirmation()
+}
+
+/// Copy for the confirmation dialog.
+pub struct ActionPrompt {
+    /// Dialog title, without an icon.
+    pub title: String,
+    /// What will happen.
+    pub body: String,
+    /// Accept button.
+    pub confirm_label: String,
+}
+
+/// Dialog text. Call this only when [`action_requires_confirmation`] is true.
+pub fn action_prompt(
+    job_name: &str,
+    action: &AgentJobAction,
+    connection: &str,
+    production: bool,
+) -> ActionPrompt {
+    match action {
+        AgentJobAction::Stop => ActionPrompt {
+            title: "Stop job?".to_owned(),
+            body: if production {
+                format!(
+                    "Stopping “{job_name}” interrupts the running job on “{connection}”, a production connection."
+                )
+            } else {
+                format!("Stopping “{job_name}” interrupts the running job on “{connection}”.")
+            },
+            confirm_label: "Stop job".to_owned(),
+        },
+        AgentJobAction::Start { step_name } => {
+            let what = match step_name.as_deref().filter(|step| !step.is_empty()) {
+                Some(step) => format!("start “{job_name}” at step “{step}”"),
+                None => format!("start “{job_name}”"),
+            };
+            production_prompt("Start job on production?", &what, connection, "Start job")
+        }
+        AgentJobAction::SetEnabled(true) => production_prompt(
+            "Enable job on production?",
+            &format!("enable “{job_name}”"),
+            connection,
+            "Enable job",
+        ),
+        AgentJobAction::SetEnabled(false) => production_prompt(
+            "Disable job on production?",
+            &format!("disable “{job_name}”"),
+            connection,
+            "Disable job",
+        ),
+    }
+}
+
+fn production_prompt(
+    title: &str,
+    verb: &str,
+    connection: &str,
+    confirm_label: &str,
+) -> ActionPrompt {
+    ActionPrompt {
+        title: title.to_owned(),
+        body: format!("This will {verb} on “{connection}”, a production connection."),
+        confirm_label: confirm_label.to_owned(),
+    }
+}
+
+/// Status-bar text after the procedure accepts the request.
+pub fn action_success(job_name: &str, action: &AgentJobAction) -> String {
+    match action {
+        AgentJobAction::Start {
+            step_name: Some(step),
+        } if !step.is_empty() => {
+            format!("Started job “{job_name}” at step “{step}”.")
+        }
+        AgentJobAction::Start { .. } => format!("Started job “{job_name}”."),
+        AgentJobAction::Stop => format!("Stop requested for job “{job_name}”."),
+        AgentJobAction::SetEnabled(true) => format!("Enabled job “{job_name}”."),
+        AgentJobAction::SetEnabled(false) => format!("Disabled job “{job_name}”."),
+    }
+}
+
+/// One sentence for the status bar when the procedure fails.
+///
+/// `code` is the SQL Server error number when the adapter has one. The message is the
+/// server text. Known cases (Agent stopped, already running, disabled, permission,
+/// missing job) replace that text; anything else is kept so the server's wording shows.
+pub fn action_failure(
+    job_name: &str,
+    action: &AgentJobAction,
+    code: Option<&str>,
+    message: &str,
+) -> String {
+    let verb = match action {
+        AgentJobAction::Start { .. } => "start",
+        AgentJobAction::Stop => "stop",
+        AgentJobAction::SetEnabled(true) => "enable",
+        AgentJobAction::SetEnabled(false) => "disable",
+    };
+    format!(
+        "Could not {verb} job “{job_name}”: {}",
+        friendly_reason(code, message)
+    )
+}
+
+fn friendly_reason(code: Option<&str>, message: &str) -> String {
+    let lower = message.to_ascii_lowercase();
+    if lower.contains("sqlserveragent is not currently running")
+        || lower.contains("sql server agent is not currently running")
+    {
+        return "SQL Server Agent is stopped.".to_owned();
+    }
+    if lower.contains("already running") {
+        return "the job is already running.".to_owned();
+    }
+    if lower.contains("not currently running") || lower.contains("not currently executing") {
+        return "the job is not running.".to_owned();
+    }
+    if code == Some("14222") || lower.contains("disabled") {
+        return "the job is disabled. Enable it before starting it.".to_owned();
+    }
+    if matches!(code, Some("229" | "230" | "300"))
+        || lower.contains("permission")
+        || lower.contains("sqlagentoperatorrole")
+    {
+        return "you do not have permission. SQLAgentOperatorRole in msdb can start, stop and \
+                enable every job; SQLAgentUserRole can change jobs it owns."
+            .to_owned();
+    }
+    if code == Some("14262") || lower.contains("does not exist") {
+        return "the job was not found.".to_owned();
+    }
+    let trimmed = message.trim();
+    if trimmed.is_empty() {
+        "the server rejected the request.".to_owned()
+    } else if let Some(code) = code.filter(|c| !c.is_empty()) {
+        format!("[{code}] {trimmed}")
+    } else {
+        trimmed.to_owned()
+    }
+}
+
+/// The statement Start, Stop, Enable or Disable executes. It does not edit steps or schedules.
+pub fn action_sql(job_name: &str, action: &AgentJobAction) -> String {
+    let name = nvarchar_expr(job_name);
+    match action {
+        AgentJobAction::Start { step_name } => {
+            let mut sql = format!("EXEC msdb.dbo.sp_start_job @job_name = {name}");
+            if let Some(step) = step_name.as_deref().filter(|step| !step.is_empty()) {
+                sql.push_str(&format!(", @step_name = {}", nvarchar_expr(step)));
+            }
+            sql.push(';');
+            sql
+        }
+        AgentJobAction::Stop => format!("EXEC msdb.dbo.sp_stop_job @job_name = {name};"),
+        AgentJobAction::SetEnabled(enabled) => format!(
+            "EXEC msdb.dbo.sp_update_job @job_name = {name}, @enabled = {};",
+            i32::from(*enabled)
+        ),
+    }
+}
+
+/// Inverse of [`action_sql`] for the statements this module generates.
+///
+/// Returns `None` for any other batch, including a CREATE script (that calls
+/// `sp_update_job` with `@job_id`, not `@job_name`).
+pub fn parse_action_sql(sql: &str) -> Option<(String, AgentJobAction)> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    let lower = trimmed.to_ascii_lowercase();
+    let action = if lower.contains("sp_start_job") {
+        AgentJobAction::Start {
+            step_name: nvarchar_param(trimmed, "@step_name"),
+        }
+    } else if lower.contains("sp_stop_job") {
+        AgentJobAction::Stop
+    } else if lower.contains("sp_update_job") && int_param(trimmed, "@enabled").is_some() {
+        AgentJobAction::SetEnabled(int_param(trimmed, "@enabled")? == 1)
+    } else {
+        return None;
+    };
+    let job_name = nvarchar_param(trimmed, "@job_name")?;
+    if job_name.is_empty() || !lower.starts_with("exec ") {
+        return None;
+    }
+    Some((job_name, action))
+}
+
+fn nvarchar_param(sql: &str, param: &str) -> Option<String> {
+    let lower = sql.to_ascii_lowercase();
+    let key = format!("{} = n'", param.to_ascii_lowercase());
+    let start = lower.find(&key)? + key.len();
+    let rest = sql.get(start..)?;
+    let mut out = String::new();
+    let mut chars = rest.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\'' {
+            if chars.peek() == Some(&'\'') {
+                chars.next();
+                out.push('\'');
+            } else {
+                return Some(out);
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    None
+}
+
+fn int_param(sql: &str, param: &str) -> Option<i32> {
+    let lower = sql.to_ascii_lowercase();
+    let key = format!("{} = ", param.to_ascii_lowercase());
+    let start = lower.find(&key)? + key.len();
+    let rest = sql.get(start..)?;
+    let digits: String = rest
+        .chars()
+        .skip_while(|c| c.is_whitespace())
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    digits.parse().ok()
 }
 
 /// T-SQL that recreates the job (category, job, steps, schedules, local target).
@@ -933,5 +1340,207 @@ mod tests {
         assert!(multi_script.contains("@type = N'MULTI-SERVER'"));
         assert!(!multi_script.contains("@owner_login_name"));
         assert!(!multi_script.contains("sp_add_jobstep"));
+    }
+
+    #[test]
+    fn running_jobs_lead_the_detail_and_keep_their_steps() {
+        let mut row = opt(&[
+            "Nightly",
+            "1",
+            "sa",
+            "Database Maintenance",
+            "4",
+            "20261024",
+            "20130",
+            "0",
+            "0",
+            "1",
+            "Rebuild",
+            "1\u{1f}Rebuild\u{1f}2\u{1f}Stats",
+        ]);
+        let job = AgentJobSummary::from_columns(&row).expect("running");
+        assert!(job.running);
+        assert_eq!(job.current_step, "Rebuild");
+        assert_eq!(job.steps.len(), 2);
+        assert_eq!(job.steps[1].name, "Stats");
+        assert!(job_detail(&job).starts_with("running · step Rebuild · enabled"));
+
+        row[9] = Some("0".into());
+        let idle = AgentJobSummary::from_columns(&row).expect("idle");
+        assert!(!idle.running);
+        assert!(idle.current_step.is_empty());
+        assert_eq!(idle.steps.len(), 2);
+
+        let mut parsed = summary();
+        parsed.apply_activity(true, "Wait", "1\u{1f}Wait");
+        assert!(parsed.running);
+        assert_eq!(parsed.current_step, "Wait");
+        parsed.apply_activity(false, "Wait", "");
+        assert!(!parsed.running);
+        assert!(parsed.current_step.is_empty());
+        assert!(parsed.steps.is_empty());
+    }
+
+    #[test]
+    fn menu_offers_only_actions_that_apply() {
+        let enabled = summary();
+        let notes = job_notes(&enabled, false);
+        let menu = job_controls(&notes);
+        assert!(menu.can_start);
+        assert!(!menu.show_stop);
+        assert_eq!(menu.set_enabled, Some(false));
+
+        let stopped_agent = job_controls(&job_notes(&enabled, true));
+        assert!(!stopped_agent.can_start);
+        assert_eq!(stopped_agent.start_reason, "SQL Server Agent is stopped.");
+        assert_eq!(stopped_agent.set_enabled, Some(false));
+
+        let mut running = enabled.clone();
+        running.running = true;
+        running.current_step = "Rebuild".into();
+        running.steps = vec![
+            AgentStep {
+                id: 1,
+                name: "Rebuild".into(),
+            },
+            AgentStep {
+                id: 2,
+                name: "Stats".into(),
+            },
+        ];
+        let menu = job_controls(&job_notes(&running, false));
+        assert!(!menu.can_start);
+        assert_eq!(menu.start_reason, "The job is already running.");
+        assert!(menu.show_stop && menu.can_stop);
+        assert_eq!(menu.steps.len(), 2);
+
+        let mut disabled = enabled;
+        disabled.enabled = false;
+        let menu = job_controls(&job_notes(&disabled, false));
+        assert!(!menu.can_start);
+        assert!(menu.start_reason.contains("Enable"));
+        assert_eq!(menu.set_enabled, Some(true));
+        assert!(job_controls(&[]).set_enabled.is_none());
+    }
+
+    #[test]
+    fn action_sql_round_trips_and_confirms_stop_everywhere() {
+        let start = AgentJobAction::Start { step_name: None };
+        let at_step = AgentJobAction::Start {
+            step_name: Some("O'Hare".into()),
+        };
+        let stop = AgentJobAction::Stop;
+        let enable = AgentJobAction::SetEnabled(true);
+        let disable = AgentJobAction::SetEnabled(false);
+
+        for action in [&start, &at_step, &stop, &enable, &disable] {
+            let sql = action_sql("O'Brien", action);
+            assert_eq!(
+                parse_action_sql(&sql),
+                Some(("O'Brien".into(), action.clone()))
+            );
+            assert_ne!(sql::classify(&sql), StatementKind::Read);
+            assert!(!sql.contains("sp_add_jobstep"));
+            assert!(!sql.contains("sp_delete_job"));
+        }
+        assert!(action_sql("Nightly", &at_step).contains("@step_name = N'O''Hare'"));
+        assert!(action_sql("Nightly", &disable).contains("@enabled = 0"));
+        assert!(parse_action_sql("SELECT 1").is_none());
+        assert!(
+            parse_action_sql("EXEC msdb.dbo.sp_update_job @job_id = @jobId, @start_step_id = 1;")
+                .is_none()
+        );
+
+        assert!(action_requires_confirmation(
+            &stop,
+            Environment::Development
+        ));
+        assert!(action_requires_confirmation(&stop, Environment::Production));
+        assert!(!action_requires_confirmation(
+            &start,
+            Environment::Development
+        ));
+        assert!(!action_requires_confirmation(&enable, Environment::Staging));
+        assert!(action_requires_confirmation(
+            &start,
+            Environment::Production
+        ));
+        assert!(action_requires_confirmation(
+            &disable,
+            Environment::Production
+        ));
+
+        let prompt = action_prompt("Nightly", &stop, "Sales", false);
+        assert!(prompt.body.contains("interrupts"));
+        assert!(!prompt.body.contains("production"));
+        let prompt = action_prompt("Nightly", &start, "Sales", true);
+        assert!(prompt.body.contains("production"));
+        assert!(prompt.body.contains("start “Nightly”"));
+
+        assert_eq!(
+            action_success("Nightly", &at_step),
+            "Started job “Nightly” at step “O'Hare”."
+        );
+        assert!(
+            action_failure(
+                "Nightly",
+                &start,
+                Some("22022"),
+                "SQLServerAgent is not currently running so it cannot be notified of this action."
+            )
+            .contains("SQL Server Agent is stopped")
+        );
+        assert!(
+            action_failure(
+                "Nightly",
+                &start,
+                None,
+                "Request to run job Nightly refused because the job is already running."
+            )
+            .contains("already running")
+        );
+        assert!(
+            action_failure(
+                "Nightly",
+                &stop,
+                None,
+                "Request to stop job Nightly refused because the job is not currently running."
+            )
+            .contains("not running")
+        );
+        assert!(
+            !action_failure(
+                "Nightly",
+                &stop,
+                None,
+                "Request to stop job Nightly refused because the job is not currently running."
+            )
+            .contains("Agent is stopped")
+        );
+        assert!(
+            action_failure("Nightly", &start, Some("14222"), "The job is disabled.")
+                .contains("disabled")
+        );
+        assert!(
+            action_failure(
+                "Nightly",
+                &start,
+                Some("229"),
+                "The EXECUTE permission was denied on the object 'sp_start_job'."
+            )
+            .contains("SQLAgentOperatorRole")
+        );
+        assert!(
+            action_failure("Nightly", &enable, Some("14262"), "does not exist")
+                .contains("not found")
+        );
+        let other = action_failure(
+            "Nightly",
+            &start,
+            Some("50000"),
+            "Backup device is offline.",
+        );
+        assert!(other.contains("Backup device is offline"));
+        assert!(other.contains("50000"));
     }
 }

@@ -90,10 +90,17 @@ pub enum UiAction {
     /// Fetch an object's DDL and open it in a new tab.
     ShowDdl(ObjectRef),
     /// Open a SQL Server Agent job's run history (one row per step) in a result tab.
-    ///
-    /// Read-only. Starting, stopping or editing a job is a later phase and must confirm on
-    /// production connections, the same way other writes do.
     ViewJobHistory(ObjectRef),
+    /// Start, stop, enable or disable a SQL Server Agent job.
+    ///
+    /// The application confirms every action on a production connection, and confirms Stop
+    /// on every connection. Step and schedule edits are not an action.
+    RunAgentJob {
+        /// Job node.
+        obj: ObjectRef,
+        /// Procedure to run.
+        action: rdbs_core::agent::AgentJobAction,
+    },
     /// Connect a profile.
     Connect(ProfileId),
     /// Disconnect a profile.

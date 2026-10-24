@@ -500,8 +500,8 @@ pub fn sample_objects(kind: DatabaseKind) -> Vec<DbObject> {
 }
 
 /// Demo SQL Server Agent jobs, matching what a Developer edition would list.
-fn sample_agent_summaries() -> Vec<rdbs_core::agent::AgentJobSummary> {
-    use rdbs_core::agent::AgentJobSummary;
+pub(crate) fn sample_agent_summaries() -> Vec<rdbs_core::agent::AgentJobSummary> {
+    use rdbs_core::agent::{AgentJobSummary, AgentStep};
     vec![
         AgentJobSummary {
             name: "Nightly index maintenance".into(),
@@ -513,6 +513,18 @@ fn sample_agent_summaries() -> Vec<rdbs_core::agent::AgentJobSummary> {
             last_run_time: Some(20_000),
             next_run_date: Some(20261024),
             next_run_time: Some(20_000),
+            running: true,
+            current_step: "Rebuild indexes".into(),
+            steps: vec![
+                AgentStep {
+                    id: 1,
+                    name: "Rebuild indexes".into(),
+                },
+                AgentStep {
+                    id: 2,
+                    name: "Update statistics".into(),
+                },
+            ],
         },
         AgentJobSummary {
             name: "Failed backup".into(),
@@ -524,6 +536,12 @@ fn sample_agent_summaries() -> Vec<rdbs_core::agent::AgentJobSummary> {
             last_run_time: Some(231_504),
             next_run_date: None,
             next_run_time: None,
+            running: false,
+            current_step: String::new(),
+            steps: vec![AgentStep {
+                id: 1,
+                name: "Run".into(),
+            }],
         },
     ]
 }
@@ -656,6 +674,19 @@ mod tests {
                 .iter()
                 .any(|j| j.kind == ObjectKind::AgentJob && j.name == "Failed backup")
         );
+        let nightly = jobs
+            .children
+            .iter()
+            .find(|j| j.name == "Nightly index maintenance")
+            .expect("nightly");
+        assert!(
+            nightly
+                .detail
+                .as_deref()
+                .unwrap_or("")
+                .starts_with("running")
+        );
+        assert!(nightly.notes.iter().any(|n| n == "running"));
         assert!(
             tree.iter()
                 .filter(|o| o.kind == ObjectKind::Database)

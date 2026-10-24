@@ -560,6 +560,82 @@ fn object_node(
     }
 }
 
+/// Start, stop, enable and disable. Hidden or disabled when the job's state makes
+/// the action meaningless. The application confirms before anything is sent.
+fn job_actions(ui: &mut Ui, obj: &DbObject, job: &ObjectRef, actions: &mut Vec<UiAction>) {
+    use rdbs_core::agent::{AgentJobAction, job_controls};
+    let controls = job_controls(&obj.notes);
+    let start = ui.add_enabled(
+        controls.can_start,
+        egui::Button::new(format!("{}  Start Job", icon::PLAY)),
+    );
+    let start = if controls.can_start {
+        start.on_hover_text("Run the job from its start step")
+    } else {
+        start.on_disabled_hover_text(controls.start_reason)
+    };
+    if start.clicked() {
+        actions.push(UiAction::RunAgentJob {
+            obj: job.clone(),
+            action: AgentJobAction::Start { step_name: None },
+        });
+    }
+    if controls.can_start && controls.steps.len() > 1 {
+        ui.menu_button(format!("{}  Start Job at Step", icon::PLAY), |ui| {
+            for step in &controls.steps {
+                if ui.button(format!("{}. {}", step.id, step.name)).clicked() {
+                    actions.push(UiAction::RunAgentJob {
+                        obj: job.clone(),
+                        action: AgentJobAction::Start {
+                            step_name: Some(step.name.clone()),
+                        },
+                    });
+                    ui.close();
+                }
+            }
+        })
+        .response
+        .on_hover_text("Run the job beginning at one of its steps");
+    }
+    if controls.show_stop {
+        let stop = ui.add_enabled(
+            controls.can_stop,
+            egui::Button::new(format!("{}  Stop Job", icon::STOP)),
+        );
+        let stop = if controls.can_stop {
+            stop.on_hover_text("Interrupt the running job. You will be asked to confirm.")
+        } else {
+            stop.on_disabled_hover_text(controls.stop_reason)
+        };
+        if stop.clicked() {
+            actions.push(UiAction::RunAgentJob {
+                obj: job.clone(),
+                action: AgentJobAction::Stop,
+            });
+        }
+    }
+    if let Some(enable) = controls.set_enabled {
+        let (label, hover) = if enable {
+            (
+                format!("{}  Enable Job", icon::CHECK),
+                "Allow the job to be started and to run on its schedule",
+            )
+        } else {
+            (
+                format!("{}  Disable Job", icon::PROHIBIT),
+                "Keep the job from being started. A job that is already running is left running.",
+            )
+        };
+        if ui.button(label).on_hover_text(hover).clicked() {
+            actions.push(UiAction::RunAgentJob {
+                obj: job.clone(),
+                action: AgentJobAction::SetEnabled(enable),
+            });
+        }
+    }
+    ui.separator();
+}
+
 #[allow(clippy::too_many_arguments)]
 fn object_menu(
     ui: &mut Ui,
@@ -578,9 +654,10 @@ fn object_menu(
         }
         return;
     }
-    // Read-only. Start, stop and enable/disable (`sp_start_job`, `sp_stop_job`,
-    // `sp_update_job`) belong in a later phase and must use production confirmation.
+    // Start, stop and enable/disable go through the application, which confirms them.
+    // Steps and schedules are not edited here.
     if let Some(r) = job_ref {
+        job_actions(ui, obj, r, actions);
         if ui
             .button(format!("{}  View History", icon::CLOCK))
             .on_hover_text(
@@ -801,6 +878,14 @@ fn object_icon_dark(obj: &DbObject) -> (&'static str, Color32) {
             (icon::GEAR, Color32::from_rgb(0x7F, 0xA2, 0xC4))
         }
         ObjectKind::Folder => (icon::FOLDER_SIMPLE, Color32::from_rgb(0x9A, 0xA3, 0xB2)),
+        ObjectKind::AgentJob
+            if obj
+                .detail
+                .as_deref()
+                .is_some_and(|d| d.starts_with("running")) =>
+        {
+            (icon::PLAY, Color32::from_rgb(0x3D, 0xDC, 0x97))
+        }
         ObjectKind::AgentJob => (icon::CLOCK, Color32::from_rgb(0xE0, 0x8A, 0x1E)),
         ObjectKind::Notice => (icon::INFO, color::text_dim()),
         ObjectKind::Table => (icon::TABLE, Color32::from_rgb(0x5E, 0xA2, 0xFF)),

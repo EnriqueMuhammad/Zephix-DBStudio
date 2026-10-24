@@ -9,11 +9,16 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 - SQL Server connections show **SQL Server Agent → Jobs** in the explorer: each job's name,
   whether it is enabled, its owner and category, the last run outcome and time, and the next
-  scheduled run. **View History** (or a double-click) opens each step of each run, including the
+  scheduled run. A job that is running shows a running indicator and, when known, the current
+  step. **View History** (or a double-click) opens each step of each run, including the
   message, in a result tab. **Script Job as CREATE** opens a T-SQL script of the job, its steps
-  and its schedules, without running it. When Agent is missing (SQL Server Express), `msdb` is
-  offline, or the login cannot read it, the folder explains that instead of failing the refresh.
-  Starting, stopping and editing jobs is not in this version.
+  and its schedules, without running it. **Start Job**, **Start Job at Step**, **Stop Job**,
+  **Enable Job** and **Disable Job** call `sp_start_job`, `sp_stop_job` and `sp_update_job`.
+  Every action asks for confirmation on a production connection, and Stop asks on every
+  connection. When Agent is missing (SQL Server Express), `msdb` is offline, or the login
+  cannot read it, the folder explains that instead of failing the refresh. A refused action
+  (permission, Agent stopped, already running, disabled) is reported in the status bar.
+  Editing a job's steps or schedules is not in this version.
 - **Table Sync…** (Tools menu, and the explorer menu of a database or schema) makes the tables
   of a target equal to the source, on the same or another engine. It synchronizes the
   **tables and columns** (creates missing tables; adds, changes and optionally drops columns,
