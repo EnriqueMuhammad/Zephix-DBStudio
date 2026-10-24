@@ -939,6 +939,14 @@ impl StudioApp {
                     self.apply(follow_up);
                 }
                 UiAction::ShowDdl(obj) => self.request_ddl(obj, false),
+                UiAction::ViewJobHistory(obj) => {
+                    self.apply(vec![UiAction::NewQuery {
+                        profile_id: Some(obj.profile_id),
+                        sql: Some(rdbs_core::agent::history_sql(&obj.name)),
+                        title: Some(format!("History · {}", obj.name)),
+                        run: true,
+                    }]);
+                }
                 UiAction::EditRoutine(obj) => self.request_ddl(obj, true),
                 UiAction::MoveConnection { id, target, below } => {
                     self.move_connection(id, target, below);
@@ -1319,7 +1327,9 @@ impl StudioApp {
         let database = self.database_override(&obj, profile.kind);
         let request_id = self.services.next_request_id();
         let edit = edit.then(|| self.routine_target(&obj, profile.kind));
-        let title = if edit.is_some() {
+        let title = if obj.kind == rdbs_core::ObjectKind::AgentJob {
+            format!("Script · {}", obj.name)
+        } else if edit.is_some() {
             format!("Edit {}", obj.name)
         } else {
             format!("DDL · {}", obj.name)

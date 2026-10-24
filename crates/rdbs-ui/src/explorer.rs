@@ -470,15 +470,41 @@ fn object_node(
     let ddl_ref = has_ddl.then(|| reference.clone());
     let routine_ref =
         matches!(obj.kind, ObjectKind::Function | ObjectKind::Procedure).then(|| reference.clone());
+    let job_ref = (obj.kind == ObjectKind::AgentJob).then(|| reference.clone());
     let object_ref = obj.kind.is_queryable().then_some(reference);
 
+    // Notices and Agent jobs put the useful text in a clipped sidebar row.
+    // Hover shows the full sentence (or the job's status line).
+    let response = match obj.kind {
+        ObjectKind::Notice => response.on_hover_text(obj.name.clone()),
+        ObjectKind::AgentJob => {
+            let text = match obj.detail.as_deref() {
+                Some(detail) if !detail.is_empty() => format!("{}\n{detail}", obj.name),
+                _ => obj.name.clone(),
+            };
+            response.on_hover_text(text)
+        }
+        ObjectKind::Folder
+            if obj.name == rdbs_core::agent::AGENT_FOLDER
+                || obj.name == rdbs_core::agent::JOBS_FOLDER =>
+        {
+            match obj.detail.as_deref() {
+                Some(detail) if !detail.is_empty() => {
+                    response.on_hover_text(format!("{}\n{detail}", obj.name))
+                }
+                _ => response,
+            }
+        }
+        _ => response,
+    };
     if response.clicked() || response.secondary_clicked() {
         state.selected = Some(key.clone());
         state.selected_profile = Some(path.profile_id);
         state.selected_object = object_ref.clone();
     }
-    // Double-click opens tables, views and routines; their columns expand with the caret.
-    let opens = object_ref.is_some() || routine_ref.is_some();
+    // Double-click opens tables, views, routines and Agent job history.
+    // Columns and folders expand with the caret.
+    let opens = object_ref.is_some() || routine_ref.is_some() || job_ref.is_some();
     if toggled || (expandable && !opens && response.double_clicked()) {
         if !state.expanded.remove(&key) {
             state.expanded.insert(key.clone());
@@ -492,6 +518,8 @@ fn object_node(
     } else if response.double_clicked() {
         if let Some(r) = &object_ref {
             actions.push(UiAction::OpenObject(r.clone()));
+        } else if let Some(r) = &job_ref {
+            actions.push(UiAction::ViewJobHistory(r.clone()));
         } else if let Some(r) = &routine_ref
             && path.kind.is_sql()
         {
@@ -506,6 +534,7 @@ fn object_node(
             object_ref.as_ref(),
             ddl_ref.as_ref(),
             routine_ref.as_ref(),
+            job_ref.as_ref(),
             path,
             actions,
         );
@@ -538,9 +567,40 @@ fn object_menu(
     object_ref: Option<&ObjectRef>,
     ddl_ref: Option<&ObjectRef>,
     routine_ref: Option<&ObjectRef>,
+    job_ref: Option<&ObjectRef>,
     path: &PathCtx,
     actions: &mut Vec<UiAction>,
 ) {
+    if obj.kind == ObjectKind::Notice {
+        ui.label(obj.name.clone());
+        if ui.button(format!("{}  Copy", icon::COPY)).clicked() {
+            ui.ctx().copy_text(obj.name.clone());
+        }
+        return;
+    }
+    // Read-only. Start, stop and enable/disable (`sp_start_job`, `sp_stop_job`,
+    // `sp_update_job`) belong in a later phase and must use production confirmation.
+    if let Some(r) = job_ref {
+        if ui
+            .button(format!("{}  View History", icon::CLOCK))
+            .on_hover_text(
+                "Each step of each run, including the message (double-click does the same)",
+            )
+            .clicked()
+        {
+            actions.push(UiAction::ViewJobHistory(r.clone()));
+        }
+        if ui
+            .button(format!("{}  Script Job as CREATE", icon::CODE))
+            .on_hover_text(
+                "Open a T-SQL script for the job, its steps and its schedules. Nothing is run.",
+            )
+            .clicked()
+        {
+            actions.push(UiAction::ShowDdl(r.clone()));
+        }
+        ui.separator();
+    }
     if let Some(r) = routine_ref
         && path.kind.is_sql()
     {
@@ -737,7 +797,12 @@ fn object_icon_dark(obj: &DbObject) -> (&'static str, Color32) {
     match obj.kind {
         ObjectKind::Database => (icon::DATABASE, Color32::from_rgb(0xE5, 0xB5, 0x4A)),
         ObjectKind::Schema => (icon::SQUARES_FOUR, Color32::from_rgb(0xB3, 0x8B, 0xF2)),
+        ObjectKind::Folder if obj.name == rdbs_core::agent::AGENT_FOLDER => {
+            (icon::GEAR, Color32::from_rgb(0x7F, 0xA2, 0xC4))
+        }
         ObjectKind::Folder => (icon::FOLDER_SIMPLE, Color32::from_rgb(0x9A, 0xA3, 0xB2)),
+        ObjectKind::AgentJob => (icon::CLOCK, Color32::from_rgb(0xE0, 0x8A, 0x1E)),
+        ObjectKind::Notice => (icon::INFO, color::text_dim()),
         ObjectKind::Table => (icon::TABLE, Color32::from_rgb(0x5E, 0xA2, 0xFF)),
         ObjectKind::View => (icon::EYE, Color32::from_rgb(0x4F, 0xC1, 0xB0)),
         ObjectKind::MaterializedView => (icon::STACK, Color32::from_rgb(0x4F, 0xC1, 0xB0)),

@@ -29,6 +29,10 @@ pub enum ObjectKind {
     Column,
     /// An index.
     Index,
+    /// A SQL Server Agent job (`msdb.dbo.sysjobs`). Read-only in the explorer.
+    AgentJob,
+    /// An informational leaf, such as why SQL Server Agent could not be read.
+    Notice,
 }
 
 impl ObjectKind {

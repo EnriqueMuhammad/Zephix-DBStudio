@@ -10,6 +10,7 @@
 //! - `FROM orders` returns order rows, anything else returns customer rows;
 //! - text containing `sleep` or `waitfor` runs for ~10 s (to try cancellation);
 //! - text containing `error` fails with an engine-specific syntax error;
+//! - a read of `sysjobhistory` returns a sample Agent job history;
 //! - a host containing `fail` makes the connection attempt fail.
 
 mod data;
@@ -196,6 +197,11 @@ impl DatabaseAdapter for MockAdapter {
     ) -> BoxFuture<'a, Result<String, DbError>> {
         Box::pin(async move {
             tokio::time::sleep(self.query_latency / 2).await;
+            if object.kind == rdbs_core::ObjectKind::AgentJob {
+                return Ok(rdbs_core::agent::create_script(&data::sample_agent_job(
+                    &object.name,
+                )));
+            }
             if object.kind == rdbs_core::ObjectKind::Table {
                 let table = sample_tables(self.kind, object.schema.as_deref())
                     .into_iter()
@@ -258,6 +264,12 @@ impl DatabaseAdapter for MockAdapter {
                     ..QueryOutcome::default()
                 }),
                 StatementKind::Read => {
+                    if lower.contains("sysjobhistory") {
+                        return Ok(QueryOutcome {
+                            results: vec![data::sample_job_history()],
+                            ..QueryOutcome::default()
+                        });
+                    }
                     // Paged reads (`OFFSET n`) see a table of DEFAULT_ROWS rows.
                     let limit = requested_rows(sql_text)
                         .unwrap_or(DEFAULT_ROWS)

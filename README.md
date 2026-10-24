@@ -14,7 +14,8 @@ and Redis. Written in Rust (egui); runs on Windows, macOS and Linux as a single 
 - **Results**: fast grid for large result sets, editing applied in one transaction, export to
   CSV, JSON or SQL.
 - **Explorer**: every database of a server, DDL viewer, table designer (fields, keys, indexes,
-  foreign keys).
+  foreign keys). SQL Server connections also list SQL Server Agent jobs (read-only: history and
+  a CREATE script).
 - **Tools**: CSV/Excel import, schema comparison with a migration script, ER diagram (SVG
   export), data transfer between servers, table sync (tables and columns, data, or both),
   visual query builder, backups on demand or on a schedule.

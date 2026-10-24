@@ -6,9 +6,11 @@
 //! - typed result values ([`value`]) and errors ([`error`]),
 //! - the capability-based adapter traits implemented by database drivers ([`adapter`]),
 //! - the typed commands and events exchanged between the UI and the worker ([`message`]),
-//! - a small SQL lexer used for highlighting and safety checks ([`sql`]).
+//! - a small SQL lexer used for highlighting and safety checks ([`sql`]),
+//! - read-only SQL Server Agent job summaries and `CREATE` scripts ([`agent`]).
 
 pub mod adapter;
+pub mod agent;
 pub mod brand;
 pub mod builder;
 pub mod complete;

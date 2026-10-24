@@ -34,6 +34,9 @@ services:
       ACCEPT_EULA: "Y"
       MSSQL_SA_PASSWORD: Rdbs_Test_Pw_2026!
       MSSQL_PID: Developer
+      # SQL Server Agent (off by default in this image). The mssql live test
+      # `agent_job_is_listed_and_scripted` creates a job in msdb and reads it back.
+      MSSQL_AGENT_ENABLED: "true"
     ports: ["51433:1433"]
 
   redis:

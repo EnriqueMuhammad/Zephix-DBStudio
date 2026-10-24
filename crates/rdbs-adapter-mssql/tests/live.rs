@@ -544,3 +544,128 @@ async fn routines_can_be_edited_and_executed() {
         .await
         .expect("edit script runs");
 }
+
+const AGENT_JOB: &str = "zephix_it_agent_job";
+
+async fn delete_agent_job(s: &mut dyn DatabaseAdapter) {
+    let sql = format!(
+        "IF EXISTS (SELECT 1 FROM msdb.dbo.sysjobs WHERE name = N'{AGENT_JOB}') \
+         EXEC msdb.dbo.sp_delete_job @job_name = N'{AGENT_JOB}', @delete_unused_schedule = 1"
+    );
+    let _ = s.execute(&sql, CancelHandle::new()).await;
+}
+
+/// Creates a disabled job in msdb and reads it back from the explorer, the script and history.
+/// Requires SQL Server Agent catalog tables (Developer/Standard/Enterprise; the compose file
+/// sets `MSSQL_AGENT_ENABLED`).
+#[tokio::test]
+async fn agent_job_is_listed_and_scripted() {
+    use rdbs_core::schema::ObjectPath;
+    let Some(mut s) = session().await else { return };
+    delete_agent_job(s.as_mut()).await;
+    s.execute(
+        "EXEC msdb.dbo.sp_add_job \
+            @job_name = N'zephix_it_agent_job', @enabled = 0, \
+            @description = N'zephix it: O''Hare', @owner_login_name = N'sa'; \
+         EXEC msdb.dbo.sp_add_jobstep \
+            @job_name = N'zephix_it_agent_job', @step_name = N'hello', \
+            @subsystem = N'TSQL', @command = N'SELECT 1 AS zephix_agent', \
+            @database_name = N'master'; \
+         EXEC msdb.dbo.sp_add_jobschedule \
+            @job_name = N'zephix_it_agent_job', @name = N'zephix_nightly', \
+            @enabled = 1, @freq_type = 4, @freq_interval = 1, \
+            @freq_subday_type = 1, @freq_subday_interval = 0, \
+            @freq_relative_interval = 0, @freq_recurrence_factor = 0, \
+            @active_start_date = 20261024, @active_end_date = 99991231, \
+            @active_start_time = 20000, @active_end_time = 235959; \
+         EXEC msdb.dbo.sp_add_jobserver \
+            @job_name = N'zephix_it_agent_job', @server_name = N'(LOCAL)';",
+        CancelHandle::new(),
+    )
+    .await
+    .expect(
+        "create sample Agent job (msdb.dbo.sysjobs must exist; \
+         set MSSQL_AGENT_ENABLED=true on the SQL Server container)",
+    );
+
+    let mut attempt = 0;
+    let tree = loop {
+        match s.load_objects().await {
+            Ok(tree) => break tree,
+            Err(e) if attempt < 3 => {
+                eprintln!("retrying load_objects after: {e}");
+                attempt += 1;
+                tokio::time::sleep(Duration::from_millis(300)).await;
+            }
+            Err(e) => panic!("objects: {e}"),
+        }
+    };
+    let agent = tree
+        .iter()
+        .find(|o| o.name == "SQL Server Agent")
+        .expect("SQL Server Agent node");
+    assert_ne!(
+        agent.detail.as_deref(),
+        Some("not available"),
+        "Agent node: {} / {:?}",
+        agent.detail.as_deref().unwrap_or(""),
+        agent.children.iter().map(|c| &c.name).collect::<Vec<_>>()
+    );
+    let job = agent
+        .children
+        .iter()
+        .find(|c| c.name == "Jobs")
+        .and_then(|folder| folder.children.iter().find(|j| j.name == AGENT_JOB))
+        .expect("sample job listed");
+    assert_eq!(job.kind, ObjectKind::AgentJob);
+    let detail = job.detail.as_deref().unwrap_or("");
+    assert!(detail.contains("disabled"), "{detail}");
+    assert!(detail.contains("sa"), "{detail}");
+    assert!(detail.contains("never run"), "{detail}");
+
+    let script = s
+        .object_ddl(&ObjectPath {
+            database: None,
+            schema: None,
+            name: AGENT_JOB.into(),
+            kind: ObjectKind::AgentJob,
+        })
+        .await
+        .expect("script job");
+    for part in [
+        "zephix_it_agent_job",
+        "O''Hare",
+        "SELECT 1 AS zephix_agent",
+        "zephix_nightly",
+        "@freq_type = 4",
+        "sp_add_jobstep",
+        "sp_add_jobschedule",
+        "@server_name = N'(LOCAL)'",
+    ] {
+        assert!(script.contains(part), "missing {part} in\n{script}");
+    }
+    assert!(!script.contains("sp_start_job"), "{script}");
+
+    let history = s
+        .execute(
+            &rdbs_core::agent::history_sql(AGENT_JOB),
+            CancelHandle::new(),
+        )
+        .await
+        .expect("job history");
+    let columns: Vec<&str> = history
+        .last_result()
+        .expect("history columns")
+        .columns
+        .iter()
+        .map(|c| c.name.as_str())
+        .collect();
+    assert!(columns.contains(&"step_id"), "{columns:?}");
+    assert!(columns.contains(&"message"), "{columns:?}");
+    assert!(columns.contains(&"outcome"), "{columns:?}");
+
+    s.execute("SELECT 1 AS still_open", CancelHandle::new())
+        .await
+        .expect("session still usable after reading Agent");
+    delete_agent_job(s.as_mut()).await;
+}

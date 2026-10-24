@@ -89,6 +89,11 @@ pub enum UiAction {
     ExecuteRoutine(ObjectRef),
     /// Fetch an object's DDL and open it in a new tab.
     ShowDdl(ObjectRef),
+    /// Open a SQL Server Agent job's run history (one row per step) in a result tab.
+    ///
+    /// Read-only. Starting, stopping or editing a job is a later phase and must confirm on
+    /// production connections, the same way other writes do.
+    ViewJobHistory(ObjectRef),
     /// Connect a profile.
     Connect(ProfileId),
     /// Disconnect a profile.
