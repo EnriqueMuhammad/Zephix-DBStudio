@@ -335,15 +335,36 @@ fn editor(ui: &mut Ui, q: &mut QueryTab, cx: &mut TabContext<'_>) {
         ui.ctx().fonts_mut(|f| f.layout_job(job))
     };
 
-    ScrollArea::both()
+    let scroll_style = ui.spacing().scroll;
+    // Solid bars stay visible. The default floating bars fade out, so a long line
+    // looks clipped even though it can be scrolled.
+    ui.spacing_mut().scroll = egui::style::ScrollStyle::solid();
+    let scrolled = ScrollArea::both()
         .id_salt(("editor-scroll", q.id))
         .auto_shrink(false)
+        .stick_to_bottom(false)
+        .stick_to_right(false)
         .show(ui, |ui| {
+            let lines = q.sql.split('\n').count().max(1);
+            let digits = lines.to_string().len().max(2) as f32;
+            let gutter_width = 16.0 + digits * 8.0;
+            let width_id = Id::new(("editor-width", q.id));
+            let remembered = ui
+                .ctx()
+                .data(|data| data.get_temp::<f32>(width_id).unwrap_or(0.0));
+            let estimated = q
+                .sql
+                .lines()
+                .map(|line| line.chars().count())
+                .max()
+                .unwrap_or(0) as f32
+                * 8.0;
+            let min_width = remembered.max(estimated);
+            // egui's scroll area asks its content to fit the viewport. A minimum wider
+            // than that is what makes the horizontal bar appear for a long line.
+            ui.set_min_width(gutter_width + 8.0 + min_width);
             ui.horizontal_top(|ui| {
                 ui.spacing_mut().item_spacing.x = 0.0;
-                let lines = q.sql.split('\n').count().max(1);
-                let digits = lines.to_string().len().max(2) as f32;
-                let gutter_width = 16.0 + digits * 8.0;
                 let numbers = (1..=lines)
                     .map(|n| n.to_string())
                     .collect::<Vec<_>>()
@@ -370,7 +391,7 @@ fn editor(ui: &mut Ui, q: &mut QueryTab, cx: &mut TabContext<'_>) {
                     .frame(Frame::NONE)
                     .lock_focus(true)
                     .desired_width(f32::INFINITY)
-                    .min_size(Vec2::new(0.0, min_height))
+                    .min_size(Vec2::new(min_width, min_height))
                     .layouter(&mut layouter)
                     .show(ui);
                 let has_selection = output
@@ -401,14 +422,103 @@ fn editor(ui: &mut Ui, q: &mut QueryTab, cx: &mut TabContext<'_>) {
                         kind.unwrap_or(rdbs_core::DatabaseKind::PostgreSql),
                     );
                 }
-            });
+                output
+            })
+            .inner
         });
+    ui.spacing_mut().scroll = scroll_style;
+    let line_width = scrolled.inner.galley.size().x + 4.0;
+    ui.ctx()
+        .data_mut(|data| data.insert_temp(Id::new(("editor-width", q.id)), line_width));
+    extend_selection_past_editor(ui, q, editor_id, &scrolled);
 
     if let Some(accepted) = q.run.autocomplete.show(ui, Id::new(("autocomplete", q.id))) {
         crate::autocomplete::apply(accepted, &mut q.sql, ui.ctx(), editor_id);
     }
     if let Some(action) = menu_action {
         apply_editor_action(ui.ctx(), editor_id, action, q, cx);
+    }
+}
+
+/// While a selection drag is held outside the editor, scroll toward the pointer and
+/// keep extending the selection. `TextEdit` only follows the pointer while it is over
+/// the widget, so the scroll offset and the cursor are written back after it returns.
+fn extend_selection_past_editor(
+    ui: &Ui,
+    q: &mut QueryTab,
+    editor_id: Id,
+    scrolled: &egui::containers::scroll_area::ScrollAreaOutput<
+        egui::widgets::text_edit::TextEditOutput,
+    >,
+) {
+    if !ui.ctx().is_being_dragged(editor_id) {
+        return;
+    }
+    let Some(pointer) = ui.input(|input| input.pointer.hover_pos().or(input.pointer.latest_pos()))
+    else {
+        return;
+    };
+    let view = scrolled.inner_rect;
+    if view.width() <= 1.0 || view.height() <= 1.0 || view.contains(pointer) {
+        return;
+    }
+    let delta = Vec2::new(
+        outside_speed(pointer.x, view.left(), view.right()),
+        outside_speed(pointer.y, view.top(), view.bottom()),
+    );
+    if delta == Vec2::ZERO {
+        return;
+    }
+
+    let max_offset = (scrolled.content_size - view.size()).max(Vec2::ZERO);
+    let mut scroll = scrolled.state;
+    let next_offset = (scroll.offset + delta).clamp(Vec2::ZERO, max_offset);
+    let moved = next_offset != scroll.offset;
+    scroll.offset = next_offset;
+    scroll.store(ui.ctx(), scrolled.id);
+
+    let edge = egui::pos2(
+        pointer.x.clamp(view.left(), view.right()),
+        pointer.y.clamp(view.top(), view.bottom()),
+    );
+    let local = (edge - scrolled.inner.galley_pos) + delta;
+    let primary = scrolled.inner.galley.cursor_from_pos(local);
+    let mut text = scrolled.inner.state.clone();
+    let secondary = text
+        .cursor
+        .char_range()
+        .map(|range| range.secondary)
+        .unwrap_or(primary);
+    text.cursor.set_char_range(Some(egui::text::CCursorRange {
+        primary,
+        secondary,
+        h_pos: None,
+    }));
+    if let Some(range) = text.cursor.char_range() {
+        q.run.cursor = Some(
+            widgets::char_range_to_bytes(&q.sql, range.primary.index.0, range.primary.index.0)
+                .start,
+        );
+        let chars = range.as_sorted_char_range();
+        q.run.selection = (chars.start.0 != chars.end.0)
+            .then(|| widgets::char_range_to_bytes(&q.sql, chars.start.0, chars.end.0));
+    }
+    text.store(ui.ctx(), editor_id);
+    if moved {
+        ui.ctx().request_repaint();
+    }
+}
+
+/// Pixels to scroll this frame when the pointer is outside one edge of the editor.
+fn outside_speed(pointer: f32, min: f32, max: f32) -> f32 {
+    if pointer > max {
+        let over = (pointer - max).clamp(0.0, 48.0);
+        12.0 + over * 0.5
+    } else if pointer < min {
+        let over = (min - pointer).clamp(0.0, 48.0);
+        -(12.0 + over * 0.5)
+    } else {
+        0.0
     }
 }
 

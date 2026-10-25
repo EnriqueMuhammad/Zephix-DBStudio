@@ -38,6 +38,15 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Tab titles stay whole when the tab bar runs out of room. Titles shrink with an ellipsis, the
+  rest scroll, and hovering a shortened title shows the full name. Tabs no longer slide under
+  the new-tab button.
+- Dragging a selection past the SQL editor scrolls the editor and keeps extending the selection.
+- A window the user restores larger than the default size stays that size. The window is pulled
+  back only when it spills past the screen, and the default size is used on the first launch.
+- Explorer names and the detail beside them end with an ellipsis when the sidebar is narrow.
+  Hovering the row shows the full text.
+- The SQL editor shows a horizontal scrollbar when a line is wider than the editor.
 - Synchronizing data into MySQL or MariaDB could stop with "affected 0 rows" on date/time
   columns: values such as `23:59:59` and `23:59:59.000000` now count as equal. MySQL and
   MariaDB connections also count matched rows as affected, so an `UPDATE` that writes the

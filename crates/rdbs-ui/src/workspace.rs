@@ -31,6 +31,9 @@ pub struct Workspace {
     pub next_tab_id: u64,
     /// Whether the explorer sidebar is shown.
     pub sidebar_visible: bool,
+    /// Active tab last scrolled fully into the tab bar (not persisted).
+    #[serde(skip)]
+    tab_reveal: Option<u64>,
 }
 
 impl Default for Workspace {
@@ -40,6 +43,7 @@ impl Default for Workspace {
             dock: DockState::new(vec![Tab::Welcome, Tab::Query(Box::new(first))]),
             next_tab_id: 2,
             sidebar_visible: true,
+            tab_reveal: None,
         }
     }
 }
@@ -194,6 +198,95 @@ impl Workspace {
             self.dock.set_focused_node_and_surface(path.node_path());
         }
     }
+
+    /// Gives overflowing tab bars a width that lands on a tab boundary, and scrolls the
+    /// active tab into view when it changes. `fallback_bar` is the dock width on the first
+    /// frame, before a leaf has a rectangle.
+    pub fn layout_tabs(
+        &mut self,
+        ctx: &egui::Context,
+        font: egui::FontId,
+        fallback_bar: f32,
+    ) -> TabStripPlan {
+        let measure = |text: &str| -> f32 {
+            ctx.fonts_mut(|fonts| {
+                fonts
+                    .layout_no_wrap(text.to_owned(), font.clone(), egui::Color32::WHITE)
+                    .size()
+                    .x
+            })
+        };
+
+        struct LeafMeasure {
+            path: egui_dock::NodePath,
+            bar: f32,
+            widths: Vec<f32>,
+            active: usize,
+            scroll: f32,
+            key: u64,
+        }
+
+        let mut leaves = Vec::new();
+        for (path, node) in self.dock.iter_all_nodes() {
+            let Some(leaf) = node.get_leaf() else {
+                continue;
+            };
+            if leaf.tabs.is_empty() || leaf.collapsed || leaf.tab_bar_hidden {
+                continue;
+            }
+            let width = leaf.rect.width();
+            let bar = if width.is_finite() && width > 32.0 {
+                width
+            } else {
+                fallback_bar
+            };
+            let widths = leaf
+                .tabs
+                .iter()
+                .map(|tab| measure(&tab.heading()))
+                .collect();
+            let key = leaf.tabs.get(leaf.active.0).map(Tab::key).unwrap_or(0);
+            leaves.push(LeafMeasure {
+                path,
+                bar,
+                widths,
+                active: leaf.active.0,
+                scroll: leaf.scroll,
+                key,
+            });
+        }
+
+        let plan = plan_strip(
+            &leaves
+                .iter()
+                .map(|leaf| (leaf.widths.as_slice(), leaf.bar))
+                .collect::<Vec<_>>(),
+        );
+
+        let focused_key = self.dock.focused_leaf().and_then(|path| {
+            leaves
+                .iter()
+                .find(|leaf| leaf.path == path)
+                .map(|leaf| leaf.key)
+        });
+        let changed = focused_key != self.tab_reveal;
+        if changed {
+            self.tab_reveal = focused_key;
+        }
+        if changed
+            && let Some(slot) = plan.slot
+            && let Some(path) = self.dock.focused_leaf()
+            && let Some(leaf) = leaves.iter().find(|leaf| leaf.path == path)
+        {
+            let available = (leaf.bar - TAB_ADD).max(0.0);
+            let widths = vec![slot; leaf.widths.len()];
+            let scroll = reveal_scroll(&widths, leaf.active, available, leaf.scroll);
+            if let Ok(node) = self.dock.leaf_mut(leaf.path) {
+                node.scroll = scroll;
+            }
+        }
+        plan
+    }
 }
 
 /// A workspace tab.
@@ -222,6 +315,185 @@ impl Tab {
             Tab::Tool(t) => t.id,
         }
     }
+
+    /// Full tab title, including the icon. This is what the tooltip shows.
+    pub fn heading(&self) -> String {
+        match self {
+            Tab::Welcome => format!("{}  Welcome", icon::HOUSE),
+            Tab::History { .. } => format!("{}  History", icon::CLOCK),
+            Tab::Tool(t) => t.title(),
+            Tab::Query(q) => {
+                let glyph = if q.run.running.is_some() {
+                    icon::CIRCLE_NOTCH
+                } else if q.data_view.is_some() {
+                    icon::TABLE
+                } else {
+                    icon::FILE_SQL
+                };
+                format!("{glyph}  {}", q.title)
+            }
+        }
+    }
+}
+
+/// How wide tabs should be when the strip runs out of room.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TabStripPlan {
+    /// Width of every tab, when titles no longer fit whole. `None` when they do.
+    pub slot: Option<f32>,
+    /// Longest title galley that still fits inside `slot`.
+    pub text_px: Option<f32>,
+}
+
+/// Padding and the close button egui_dock 0.21 adds around a tab title.
+const TAB_CHROME: f32 = 40.0;
+/// The "+" button reserved at the end of the tab bar.
+const TAB_ADD: f32 = 24.0;
+/// Shortest slot we try before shrinking further: chrome plus a readable fragment.
+const TAB_MIN_SLOT: f32 = TAB_CHROME + 28.0;
+/// A title wider than this is ellipsized so one long name cannot swallow the bar.
+const TAB_MAX: f32 = 240.0;
+
+/// Picks one tab width so every leaf shows whole tabs and the rest scroll.
+fn plan_strip(leaves: &[(&[f32], f32)]) -> TabStripPlan {
+    let overflowing = leaves.iter().any(|(widths, bar)| overflows(widths, *bar));
+    let Some(slot) = overflowing.then(|| choose_slot(leaves)).flatten() else {
+        return TabStripPlan {
+            slot: None,
+            text_px: None,
+        };
+    };
+    TabStripPlan {
+        slot: Some(slot),
+        // Two extra points so a font-hint difference cannot push the title under the close button.
+        text_px: Some((slot - TAB_CHROME - 2.0).max(4.0)),
+    }
+}
+
+fn overflows(widths: &[f32], bar: f32) -> bool {
+    if widths.is_empty() || !bar.is_finite() {
+        return false;
+    }
+    let clip = bar - TAB_ADD;
+    widths.iter().map(|width| width + TAB_CHROME).sum::<f32>() > clip + 0.5
+}
+
+fn choose_slot(leaves: &[(&[f32], f32)]) -> Option<f32> {
+    let clips: Vec<(f32, usize)> = leaves
+        .iter()
+        .filter_map(|(widths, bar)| {
+            if widths.is_empty() || !bar.is_finite() {
+                return None;
+            }
+            let clip = bar - TAB_ADD;
+            (clip >= 16.0).then_some((clip, widths.len()))
+        })
+        .collect();
+    if clips.is_empty() {
+        return None;
+    }
+    // Start near the real title width. Searching from the whole bar downward
+    // would accept one tab stretched across the strip and scroll every other tab away.
+    let widest = leaves
+        .iter()
+        .flat_map(|(widths, _)| widths.iter().copied())
+        .map(|width| (width + TAB_CHROME).min(TAB_MAX))
+        .fold(TAB_MIN_SLOT, f32::max);
+    let narrowest = clips
+        .iter()
+        .map(|(clip, _)| clip - 4.0)
+        .fold(f32::MAX, f32::min);
+    let max_slot = (widest + 36.0).min(narrowest).max(8.0);
+    let mut floor = TAB_MIN_SLOT.min(max_slot);
+    loop {
+        let mut slot_px = max_slot.floor() as i32;
+        let stop_px = floor.ceil() as i32;
+        while slot_px >= stop_px {
+            let slot = slot_px as f32;
+            if clips
+                .iter()
+                .all(|(clip, count)| clips_cleanly(*clip, *count, slot))
+            {
+                return Some(slot);
+            }
+            slot_px -= 1;
+        }
+        if floor <= 20.0 {
+            return Some(max_slot.max(8.0));
+        }
+        floor = (floor * 0.5).max(20.0);
+    }
+}
+
+/// `slot` shows `count` tabs in `clip` points without cutting a title.
+/// A gap of at most 8 points is only the tab's left padding, so no glyph is sliced.
+fn clips_cleanly(clip: f32, count: usize, slot: f32) -> bool {
+    if !(slot.is_finite() && slot > 1.0 && clip.is_finite()) || count == 0 {
+        return false;
+    }
+    let fits = (clip / slot).floor() as usize;
+    let visible = fits.clamp(1, count);
+    let used = visible as f32 * slot;
+    if used > clip - 3.5 {
+        return false;
+    }
+    visible >= count || clip - used <= 8.0
+}
+
+/// Scroll offset that puts tab `index` fully inside a bar of `available` points.
+/// Offsets are negative, matching egui_dock's tab-bar scroll.
+fn reveal_scroll(widths: &[f32], index: usize, available: f32, current: f32) -> f32 {
+    if widths.is_empty() || !available.is_finite() || available <= 0.0 {
+        return current;
+    }
+    let index = index.min(widths.len() - 1);
+    let left: f32 = widths.iter().take(index).sum();
+    let right = left + widths[index];
+    let view_left = -current;
+    let mut new_left = view_left;
+    if right > view_left + available {
+        new_left = right - available;
+    }
+    if left < new_left {
+        new_left = left;
+    }
+    let total: f32 = widths.iter().sum();
+    let max_scroll = (total - available).max(0.0);
+    (-new_left).clamp(-max_scroll, 0.0)
+}
+
+/// Shortens `text` with an ellipsis so it fits in `max_width` points of the button font.
+fn ellipsize_title(ctx: &egui::Context, font: &egui::FontId, text: &str, max_width: f32) -> String {
+    let width = |sample: &str| -> f32 {
+        ctx.fonts_mut(|fonts| {
+            fonts
+                .layout_no_wrap(sample.to_owned(), font.clone(), egui::Color32::WHITE)
+                .size()
+                .x
+        })
+    };
+    if width(text) <= max_width {
+        return text.to_owned();
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let mut low = 0;
+    let mut high = chars.len();
+    while low + 1 < high {
+        let mid = (low + high) / 2;
+        let mut sample: String = chars[..mid].iter().collect();
+        sample.push('…');
+        if width(&sample) <= max_width {
+            low = mid;
+        } else {
+            high = mid;
+        }
+    }
+    if low == 0 {
+        return "…".to_owned();
+    }
+    let mut out: String = chars[..low].iter().collect();
+    out.push('…');
+    out
 }
 
 /// A SQL editor tab. Only the SQL text and target connection are persisted.
@@ -408,6 +680,12 @@ pub struct TabContext<'a> {
     pub backups: &'a crate::model::BackupState,
     /// Actions requested during this frame.
     pub actions: &'a mut Vec<UiAction>,
+    /// Maximum title width when the tab strip overflows. `None` when every title fits.
+    pub tab_text_px: Option<f32>,
+    /// Context used to measure titles. Absent when no tab is being drawn.
+    pub egui: Option<egui::Context>,
+    /// Button font the tab bar paints titles with.
+    pub button_font: Option<egui::FontId>,
 }
 
 impl TabContext<'_> {
@@ -425,20 +703,16 @@ impl TabViewer for TabContext<'_> {
     }
 
     fn title(&mut self, tab: &mut Tab) -> WidgetText {
-        match tab {
-            Tab::Welcome => format!("{}  Welcome", icon::HOUSE).into(),
-            Tab::History { .. } => format!("{}  History", icon::CLOCK).into(),
-            Tab::Tool(t) => t.title().into(),
-            Tab::Query(q) => {
-                let glyph = if q.run.running.is_some() {
-                    icon::CIRCLE_NOTCH
-                } else if q.data_view.is_some() {
-                    icon::TABLE
-                } else {
-                    icon::FILE_SQL
-                };
-                format!("{glyph}  {}", q.title).into()
+        let full = tab.heading();
+        match (
+            self.tab_text_px,
+            self.egui.as_ref(),
+            self.button_font.as_ref(),
+        ) {
+            (Some(max_width), Some(ctx), Some(font)) => {
+                ellipsize_title(ctx, font, &full, max_width).into()
             }
+            _ => full.into(),
         }
     }
 
@@ -463,6 +737,17 @@ impl TabViewer for TabContext<'_> {
     }
 
     fn on_tab_button(&mut self, tab: &mut Tab, response: &egui::Response) {
+        let full = tab.heading();
+        if let (Some(max_width), Some(ctx), Some(font)) = (
+            self.tab_text_px,
+            self.egui.as_ref(),
+            self.button_font.as_ref(),
+        ) {
+            let shown = ellipsize_title(ctx, font, &full, max_width);
+            if shown != full {
+                response.clone().on_hover_text(full.clone());
+            }
+        }
         // Replaces egui_dock's own tab menu (see `DockArea::tab_context_menus`).
         let key = tab.key();
         response.context_menu(|ui| {
@@ -562,5 +847,81 @@ mod tests {
             .filter(|(_, t)| matches!(t, Tab::Welcome))
             .count();
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn short_titles_keep_their_own_width() {
+        let plan = plan_strip(&[(&[40.0, 50.0], 500.0)]);
+        assert_eq!(plan.slot, None);
+        assert_eq!(plan.text_px, None);
+    }
+
+    #[test]
+    fn overflowing_tabs_end_on_a_boundary() {
+        let widths = vec![120.0; 8];
+        let bar = 360.0;
+        let plan = plan_strip(&[(&widths, bar)]);
+        let slot = plan.slot.expect("the strip overflows");
+        let clip = bar - TAB_ADD;
+        assert!(
+            clips_cleanly(clip, widths.len(), slot),
+            "slot {slot} clips a title"
+        );
+        let text = plan.text_px.expect("text budget");
+        assert!(text <= slot - TAB_CHROME);
+        // Whole tabs fit in the space left beside the add button, and at least one scrolls away.
+        let visible = (clip / slot).floor() as usize;
+        assert!(visible >= 1 && visible < widths.len());
+    }
+
+    #[test]
+    fn short_titles_stay_readable_when_the_bar_scrolls() {
+        let widths = vec![80.0; 12];
+        let bar = 800.0;
+        let plan = plan_strip(&[(&widths, bar)]);
+        let slot = plan.slot.expect("the strip overflows");
+        let clip = bar - TAB_ADD;
+        let visible = (clip / slot).floor() as usize;
+        assert!(
+            visible >= 3,
+            "slot {slot} only leaves {visible} tabs on screen"
+        );
+        assert!(clips_cleanly(clip, widths.len(), slot));
+        // The slot stays near the title width, so the label is not crushed to a fragment.
+        assert!(slot + 0.5 >= 80.0 + TAB_CHROME - 36.0, "slot {slot}");
+    }
+
+    #[test]
+    fn every_leaf_keeps_whole_tabs() {
+        let wide = vec![90.0; 6];
+        let narrow = vec![90.0; 6];
+        let plan = plan_strip(&[(&wide, 640.0), (&narrow, 220.0)]);
+        let slot = plan.slot.expect("the narrow strip overflows");
+        assert!(clips_cleanly(640.0 - TAB_ADD, wide.len(), slot));
+        assert!(clips_cleanly(220.0 - TAB_ADD, narrow.len(), slot));
+    }
+
+    #[test]
+    fn reveal_scroll_brings_the_active_tab_into_view() {
+        let widths = [100.0; 8];
+        let scroll = reveal_scroll(&widths, 5, 240.0, 0.0);
+        assert!((scroll + 360.0).abs() < 0.1, "scroll {scroll}");
+        let again = reveal_scroll(&widths, 5, 240.0, scroll);
+        assert!((again - scroll).abs() < 0.1);
+        assert_eq!(reveal_scroll(&widths, 1, 240.0, 0.0), 0.0);
+    }
+
+    #[test]
+    fn ellipsize_title_keeps_short_text_and_marks_long_text() {
+        let ctx = egui::Context::default();
+        let mut output = ctx.run_ui(egui::RawInput::default(), |_| {});
+        let font = egui::TextStyle::Button.resolve(ctx.global_style().as_ref());
+        assert_eq!(ellipsize_title(&ctx, &font, "Query 1", 400.0), "Query 1");
+        let long = "Query 1 — a very long tab title that cannot fit";
+        let short = ellipsize_title(&ctx, &font, long, 48.0);
+        assert!(short.ends_with('…'), "{short}");
+        assert!(short.chars().count() < long.chars().count());
+        assert!(!short.contains("cannot fit"));
+        output.textures_delta.clear();
     }
 }
