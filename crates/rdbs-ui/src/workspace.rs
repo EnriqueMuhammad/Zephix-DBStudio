@@ -351,6 +351,8 @@ const TAB_CHROME: f32 = 40.0;
 const TAB_ADD: f32 = 24.0;
 /// Shortest slot we try before shrinking further: chrome plus a readable fragment.
 const TAB_MIN_SLOT: f32 = TAB_CHROME + 28.0;
+/// A title wider than this is ellipsized so one long name cannot swallow the bar.
+const TAB_MAX: f32 = 240.0;
 
 /// Picks one tab width so every leaf shows whole tabs and the rest scroll.
 fn plan_strip(leaves: &[(&[f32], f32)]) -> TabStripPlan {
@@ -390,14 +392,22 @@ fn choose_slot(leaves: &[(&[f32], f32)]) -> Option<f32> {
     if clips.is_empty() {
         return None;
     }
-    let max_slot = clips
+    // Start near the real title width. Searching from the whole bar downward
+    // would accept one tab stretched across the strip and scroll every other tab away.
+    let widest = leaves
+        .iter()
+        .flat_map(|(widths, _)| widths.iter().copied())
+        .map(|width| (width + TAB_CHROME).min(TAB_MAX))
+        .fold(TAB_MIN_SLOT, f32::max);
+    let narrowest = clips
         .iter()
         .map(|(clip, _)| clip - 4.0)
         .fold(f32::MAX, f32::min);
-    let mut floor = TAB_MIN_SLOT;
+    let max_slot = (widest + 36.0).min(narrowest).max(8.0);
+    let mut floor = TAB_MIN_SLOT.min(max_slot);
     loop {
         let mut slot_px = max_slot.floor() as i32;
-        let stop_px = floor.min(max_slot).ceil() as i32;
+        let stop_px = floor.ceil() as i32;
         while slot_px >= stop_px {
             let slot = slot_px as f32;
             if clips
@@ -862,6 +872,23 @@ mod tests {
         // Whole tabs fit in the space left beside the add button, and at least one scrolls away.
         let visible = (clip / slot).floor() as usize;
         assert!(visible >= 1 && visible < widths.len());
+    }
+
+    #[test]
+    fn short_titles_stay_readable_when_the_bar_scrolls() {
+        let widths = vec![80.0; 12];
+        let bar = 800.0;
+        let plan = plan_strip(&[(&widths, bar)]);
+        let slot = plan.slot.expect("the strip overflows");
+        let clip = bar - TAB_ADD;
+        let visible = (clip / slot).floor() as usize;
+        assert!(
+            visible >= 3,
+            "slot {slot} only leaves {visible} tabs on screen"
+        );
+        assert!(clips_cleanly(clip, widths.len(), slot));
+        // The slot stays near the title width, so the label is not crushed to a fragment.
+        assert!(slot + 0.5 >= 80.0 + TAB_CHROME - 36.0, "slot {slot}");
     }
 
     #[test]

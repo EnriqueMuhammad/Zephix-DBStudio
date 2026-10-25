@@ -336,18 +336,35 @@ fn editor(ui: &mut Ui, q: &mut QueryTab, cx: &mut TabContext<'_>) {
     };
 
     let scroll_style = ui.spacing().scroll;
-    ui.spacing_mut().scroll = egui::style::ScrollStyle::thin();
+    // Solid bars stay visible. The default floating bars fade out, so a long line
+    // looks clipped even though it can be scrolled.
+    ui.spacing_mut().scroll = egui::style::ScrollStyle::solid();
     let scrolled = ScrollArea::both()
         .id_salt(("editor-scroll", q.id))
         .auto_shrink(false)
         .stick_to_bottom(false)
         .stick_to_right(false)
         .show(ui, |ui| {
+            let lines = q.sql.split('\n').count().max(1);
+            let digits = lines.to_string().len().max(2) as f32;
+            let gutter_width = 16.0 + digits * 8.0;
+            let width_id = Id::new(("editor-width", q.id));
+            let remembered = ui
+                .ctx()
+                .data(|data| data.get_temp::<f32>(width_id).unwrap_or(0.0));
+            let estimated = q
+                .sql
+                .lines()
+                .map(|line| line.chars().count())
+                .max()
+                .unwrap_or(0) as f32
+                * 8.0;
+            let min_width = remembered.max(estimated);
+            // egui's scroll area asks its content to fit the viewport. A minimum wider
+            // than that is what makes the horizontal bar appear for a long line.
+            ui.set_min_width(gutter_width + 8.0 + min_width);
             ui.horizontal_top(|ui| {
                 ui.spacing_mut().item_spacing.x = 0.0;
-                let lines = q.sql.split('\n').count().max(1);
-                let digits = lines.to_string().len().max(2) as f32;
-                let gutter_width = 16.0 + digits * 8.0;
                 let numbers = (1..=lines)
                     .map(|n| n.to_string())
                     .collect::<Vec<_>>()
@@ -367,18 +384,6 @@ fn editor(ui: &mut Ui, q: &mut QueryTab, cx: &mut TabContext<'_>) {
                 ui.add_space(8.0);
 
                 let min_height = ui.available_height();
-                let width_id = Id::new(("editor-width", q.id));
-                let remembered = ui
-                    .ctx()
-                    .data(|data| data.get_temp::<f32>(width_id).unwrap_or(0.0));
-                let estimated = q
-                    .sql
-                    .lines()
-                    .map(|line| line.chars().count())
-                    .max()
-                    .unwrap_or(0) as f32
-                    * 8.0;
-                let min_width = remembered.max(estimated);
                 let output = TextEdit::multiline(&mut q.sql)
                     .id(editor_id)
                     .font(font.clone())

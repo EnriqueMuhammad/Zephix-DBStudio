@@ -16,6 +16,9 @@ pub struct WindowFit {
     /// since they are briefly wrong while the window opens, moves to another monitor or
     /// changes its DPI.
     last: Option<(Vec2, Vec2)>,
+    /// Outer size and the inner size already requested for it. A window manager that will
+    /// not shrink any further would otherwise be asked again on every frame.
+    clamp_request: Option<(Vec2, Vec2)>,
 }
 
 impl WindowFit {
@@ -73,12 +76,19 @@ impl WindowFit {
             return;
         }
         if fits(outer.size(), monitor) {
+            self.clamp_request = None;
             return;
         }
         let Some(inner) = inner else {
             return;
         };
         let size = clamp_inner(outer.size(), inner.size(), monitor);
+        // The same request again means the window manager kept this outer size.
+        // Asking every frame would repaint forever and never get closer.
+        if self.clamp_request == Some((outer.size(), size)) {
+            return;
+        }
+        self.clamp_request = Some((outer.size(), size));
         tracing::info!(
             "window {:.0}x{:.0} is past the {:.0}x{:.0} work area; clamping the inner size to {:.0}x{:.0}",
             outer.width(),
