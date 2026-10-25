@@ -162,25 +162,32 @@ fn profile_node(
         } else {
             color::text_dim()
         };
-        let galley = ui.painter().layout_no_wrap(
-            profile.name.clone(),
+        let shows_env = profile.environment != rdbs_core::Environment::Development;
+        let right_limit = rect.right() - 22.0;
+        let name_width = (right_limit - if shows_env { 36.0 } else { 0.0 } - x).max(8.0);
+        let name = fit_label(
+            ui,
+            &profile.name,
             FontId::proportional(13.5),
             text_color,
+            name_width,
         );
-        ui.painter().galley(
-            egui::pos2(x, rect.center().y - galley.size().y / 2.0),
-            galley.clone(),
+        let painter = ui.painter_at(rect);
+        let painted = name.size();
+        painter.galley(
+            egui::pos2(x, rect.center().y - painted.y / 2.0),
+            name,
             text_color,
         );
-        x += galley.size().x + 6.0;
-        if profile.environment != rdbs_core::Environment::Development {
+        x += painted.x + 6.0;
+        if shows_env && x + 28.0 <= right_limit {
             let c = theme::env_color(profile.environment);
             let label = if profile.environment == rdbs_core::Environment::Production {
                 "PROD"
             } else {
                 "STG"
             };
-            ui.painter().text(
+            painter.text(
                 egui::pos2(x, rect.center().y),
                 Align2::LEFT_CENTER,
                 label,
@@ -217,7 +224,8 @@ fn profile_node(
         _ => String::new(),
     };
     let response = response.on_hover_text(format!(
-        "{} · {}\n{}{server}\nDrag to reorder",
+        "{}\n{} · {}\n{}{server}\nDrag to reorder",
+        profile.name,
         profile.kind,
         profile.environment.label(),
         profile.endpoint()
@@ -430,19 +438,39 @@ fn object_node(
             FontId::proportional(14.0),
             glyph_color,
         );
-        let galley =
-            painter.layout_no_wrap(obj.name.clone(), FontId::proportional(13.0), color::text());
-        let pos = egui::pos2(rect.left() + 20.0, rect.center().y - galley.size().y / 2.0);
-        let name_width = galley.size().x;
-        painter.galley(pos, galley, color::text());
-        if let Some(detail) = &obj.detail {
-            painter.text(
-                egui::pos2(pos.x + name_width + 8.0, rect.center().y),
-                Align2::LEFT_CENTER,
-                detail,
-                FontId::proportional(11.0),
-                color::text_faint(),
-            );
+        let name_x = rect.left() + 20.0;
+        let available = (rect.right() - 4.0 - name_x).max(0.0);
+        let name_font = FontId::proportional(13.0);
+        let detail_font = FontId::proportional(11.0);
+        let detail = obj.detail.as_deref().filter(|text| !text.is_empty());
+        let name_natural = label_width(ui, &obj.name, name_font.clone());
+        let detail_natural = detail
+            .map(|text| label_width(ui, text, detail_font.clone()))
+            .unwrap_or(0.0);
+        let gap = if detail.is_some() { 8.0 } else { 0.0 };
+        let name_budget = if detail.is_some() && name_natural + gap + detail_natural > available {
+            (available * 0.62).clamp(available.min(24.0), available)
+        } else {
+            available
+        };
+        let name = fit_label(ui, &obj.name, name_font, color::text(), name_budget);
+        let name_pos = egui::pos2(name_x, rect.center().y - name.size().y / 2.0);
+        let painted_name = name.size().x;
+        painter.galley(name_pos, name, color::text());
+        if let Some(detail) = detail {
+            let detail_budget = (available - painted_name - gap).max(0.0);
+            if detail_budget >= 12.0 {
+                let detail_galley =
+                    fit_label(ui, detail, detail_font, color::text_faint(), detail_budget);
+                painter.galley(
+                    egui::pos2(
+                        name_pos.x + painted_name + gap,
+                        rect.center().y - detail_galley.size().y / 2.0,
+                    ),
+                    detail_galley,
+                    color::text_faint(),
+                );
+            }
         }
     });
 
@@ -473,30 +501,11 @@ fn object_node(
     let job_ref = (obj.kind == ObjectKind::AgentJob).then(|| reference.clone());
     let object_ref = obj.kind.is_queryable().then_some(reference);
 
-    // Notices and Agent jobs put the useful text in a clipped sidebar row.
-    // Hover shows the full sentence (or the job's status line).
-    let response = match obj.kind {
-        ObjectKind::Notice => response.on_hover_text(obj.name.clone()),
-        ObjectKind::AgentJob => {
-            let text = match obj.detail.as_deref() {
-                Some(detail) if !detail.is_empty() => format!("{}\n{detail}", obj.name),
-                _ => obj.name.clone(),
-            };
-            response.on_hover_text(text)
-        }
-        ObjectKind::Folder
-            if obj.name == rdbs_core::agent::AGENT_FOLDER
-                || obj.name == rdbs_core::agent::JOBS_FOLDER =>
-        {
-            match obj.detail.as_deref() {
-                Some(detail) if !detail.is_empty() => {
-                    response.on_hover_text(format!("{}\n{detail}", obj.name))
-                }
-                _ => response,
-            }
-        }
-        _ => response,
+    let hover = match obj.detail.as_deref() {
+        Some(detail) if !detail.is_empty() => format!("{}\n{detail}", obj.name),
+        _ => obj.name.clone(),
     };
+    let response = response.on_hover_text(hover);
     if response.clicked() || response.secondary_clicked() {
         state.selected = Some(key.clone());
         state.selected_profile = Some(path.profile_id);
@@ -906,15 +915,52 @@ fn object_icon_dark(obj: &DbObject) -> (&'static str, Color32) {
 }
 
 fn hint_row(ui: &mut Ui, depth: usize, text: &str, c: Color32) {
-    let (rect, _) =
+    let (rect, response) =
         ui.allocate_exact_size(Vec2::new(ui.available_width(), ROW_HEIGHT), Sense::hover());
-    ui.painter().text(
-        egui::pos2(rect.left() + 20.0 + depth as f32 * INDENT, rect.center().y),
-        Align2::LEFT_CENTER,
+    let x = rect.left() + 20.0 + depth as f32 * INDENT;
+    let galley = fit_label(
+        ui,
         text,
         FontId::proportional(12.0),
         c,
+        (rect.right() - 6.0 - x).max(0.0),
     );
+    ui.painter_at(rect).galley(
+        egui::pos2(x, rect.center().y - galley.size().y / 2.0),
+        galley,
+        c,
+    );
+    response.on_hover_text(text);
+}
+
+/// Width of `text` on one line.
+fn label_width(ui: &Ui, text: &str, font: FontId) -> f32 {
+    ui.ctx().fonts_mut(|fonts| {
+        fonts
+            .layout_no_wrap(text.to_owned(), font, color::text())
+            .size()
+            .x
+    })
+}
+
+/// Lays `text` out on one line, ending with an ellipsis when it is wider than `max_width`.
+fn fit_label(
+    ui: &Ui,
+    text: &str,
+    font: FontId,
+    color: Color32,
+    max_width: f32,
+) -> std::sync::Arc<egui::Galley> {
+    let mut job = egui::text::LayoutJob::single_section(
+        text.to_owned(),
+        egui::TextFormat {
+            font_id: font,
+            color,
+            ..Default::default()
+        },
+    );
+    job.wrap = egui::text::TextWrapping::truncate_at_width(max_width.max(0.0));
+    ui.ctx().fonts_mut(|fonts| fonts.layout_job(job))
 }
 
 /// A full-width, selectable tree row with an optional disclosure caret.

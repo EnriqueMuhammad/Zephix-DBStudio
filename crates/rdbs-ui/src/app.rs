@@ -858,6 +858,9 @@ impl StudioApp {
                 history,
                 backups,
                 actions,
+                tab_text_px: None,
+                egui: None,
+                button_font: None,
             };
             editor::request_run(q, &mut cx);
         }
@@ -884,6 +887,9 @@ impl StudioApp {
                 history,
                 backups,
                 actions: &mut actions,
+                tab_text_px: None,
+                egui: None,
+                button_font: None,
             };
             editor::request_run(q, &mut cx);
         }
@@ -2523,6 +2529,7 @@ fn dock_style(style: &mut egui_dock::Style) {
     style.tab.tab_body.inner_margin = Margin::ZERO;
     style.tab.tab_body.stroke = Stroke::new(1.0, color::border());
     style.tab.hline_below_active_tab_name = true;
+    style.tab_bar.show_scroll_bar_on_overflow = true;
 
     style.separator.color_idle = color::border();
     style.separator.color_hovered = color::accent();
@@ -2578,6 +2585,13 @@ impl eframe::App for StudioApp {
         CentralPanel::no_frame().show(ui, |ui| {
             let mut style = egui_dock::Style::from_egui(ui.style());
             dock_style(&mut style);
+            let button_font = egui::TextStyle::Button.resolve(ui.style());
+            let tab_plan =
+                self.workspace
+                    .layout_tabs(ui.ctx(), button_font.clone(), ui.available_width());
+            if let Some(slot) = tab_plan.slot {
+                style.tab.minimum_width = Some(slot);
+            }
             let mut cx = TabContext {
                 profiles: &self.profiles,
                 connections: &self.connections,
@@ -2586,6 +2600,9 @@ impl eframe::App for StudioApp {
                 history: &self.history,
                 backups: &self.backups,
                 actions: &mut actions,
+                tab_text_px: tab_plan.text_px,
+                egui: Some(ui.ctx().clone()),
+                button_font: Some(button_font),
             };
             DockArea::new(&mut self.workspace.dock)
                 .id(Id::new("workspace-dock"))
