@@ -16,12 +16,16 @@ fake demo data.
   Secret Service) or asked once per run. Writes on a production connection ask for confirmation.
 - **Query editor.** Syntax highlighting, autocomplete, run the script or only the selection,
   multiple result sets, stop a running query, query history, and explain / explain analyze.
+  Scripts open from and save to `.sql` files; unsaved changes are asked about before a tab or
+  Zephix closes.
   MongoDB uses shell syntax. Redis uses redis-cli syntax.
 - **Results.** A grid for large result sets, edits applied in one transaction, and export to
   CSV, JSON, or SQL INSERT.
 - **Explorer.** Every database on a server, a DDL viewer, and a table designer (columns, keys,
-  indexes, foreign keys). Routines can be executed from the tree. SQL Server connections also
-  list SQL Server Agent jobs: history, a CREATE script, and start, stop, enable, and disable.
+  indexes, foreign keys). Folders can be filtered by name and refreshed. Routines can be
+  executed from the tree. SQL Server databases have Programmability and Security folders
+  (procedures, functions, triggers, types, sequences, users, roles, keys and more), and SQL
+  Server connections list SQL Server Agent jobs: history, a CREATE script, and start, stop, enable, and disable.
   Those actions are confirmed on production connections, and Stop is always confirmed. Zephix
   does not edit job steps or schedules.
 - **Tools.** CSV/Excel import, schema comparison with a migration script, an ER diagram (SVG
@@ -55,12 +59,12 @@ Oracle connections need Oracle Instant Client (64-bit) on `PATH`.
 
 ## Install and download
 
-Current release: [v0.2.0](https://github.com/EnriqueMuhammad/Zephix-DBStudio/releases/tag/v0.2.0).
+Current release: [v0.3.0](https://github.com/EnriqueMuhammad/Zephix-DBStudio/releases/tag/v0.3.0).
 
 | Platform | What you get |
 | --- | --- |
-| Windows | `Zephix-0.2.0-x64.msi` (per-user, no administrator rights) or the portable `Zephix-0.2.0-x64.exe` |
-| macOS | `Zephix-0.2.0-arm64.pkg` (Apple silicon) |
+| Windows | `Zephix-0.3.0-x64.msi` (per-user, no administrator rights) or the portable `Zephix-0.3.0-x64.exe` |
+| macOS | `Zephix-0.3.0-arm64.pkg` (Apple silicon) |
 | Linux | Build from source (below). There is no Linux binary in the release. |
 
 Windows packaging notes are in [docs/RELEASING.md](docs/RELEASING.md). Checksums are in
@@ -126,6 +130,8 @@ text says Ctrl.
 | --- | --- |
 | Ctrl+N | New connection |
 | Ctrl+T | New query tab |
+| Ctrl+O | Open a `.sql` file |
+| Ctrl+S / Ctrl+Shift+S | Save the query / save it under a new name |
 | Ctrl+Enter or Ctrl+R | Run the query, or the selection if there is one |
 | Ctrl+Space | Autocomplete |
 | Ctrl+W | Close tab |
