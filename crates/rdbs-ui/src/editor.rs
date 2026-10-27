@@ -175,6 +175,8 @@ fn data_toolbar(ui: &mut Ui, q: &mut QueryTab, cx: &mut TabContext<'_>) {
                 && let Some(view) = q.data_view.take()
             {
                 q.sql = view.sql();
+                // A new script starts out unchanged.
+                q.saved = q.sql.clone();
                 q.run.focus_editor = true;
             }
             if let Some(p) = q.profile_id.and_then(|id| cx.profile(id)) {

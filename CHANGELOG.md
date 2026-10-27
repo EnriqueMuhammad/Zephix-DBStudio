@@ -3,6 +3,57 @@
 All notable changes to Zephix. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project uses [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Added
+
+- SQL Server databases show **Programmability** (Stored Procedures, Functions, Database
+  Triggers, Assemblies, Types, Rules, Defaults, Plan Guides, Sequences) and **Security**
+  (Users, Roles, Schemas, Asymmetric Keys, Certificates, Symmetric Keys, Always Encrypted Keys,
+  Database Audit Specifications, Security Policies) after their schemas. Entries show as
+  `schema.name`; procedures and functions there can be edited, executed and scripted. A
+  category the server or the login cannot read explains why instead of failing the refresh.
+- Query scripts can be opened and saved as `.sql` files: **File > Open Query…** (Ctrl+O),
+  **Save Query** (Ctrl+S) and **Save Query As…** (Ctrl+Shift+S), the Open and Save buttons of
+  the toolbar, and Save / Save As in a tab's right-click menu. The dialogs start in the folder
+  used last, or `Documents\Zephix`. A file tab is named after the file and shows its path on
+  hover; opening a file that is already open switches to its tab.
+- A tab whose script changed since it was opened, saved or generated shows `*` after its title.
+  Closing it (its close button, Ctrl+W, Close Other Tabs or Close All Tabs) asks to **Save**,
+  **Don't Save** or **Cancel**; a query that was never saved asks whether to save it to a
+  file first. Tabs restored from an earlier version count as unsaved.
+- Closing Zephix while queries have unsaved changes lists them and asks to **Save All** (a query
+  without a file asks for a file name), **Don't Save** (they are dropped and not reopened next
+  time) or **Cancel**.
+- Folders in the explorer (Tables, Views, Procedures, …) have **Filter**: only names
+  containing the text are listed, and the folder shows the filter. Folders, schemas and
+  databases have **Refresh**, which reads that database again.
+
+### Changed
+
+- Development connections show a green **DEV** label, like STG and PROD.
+- Tabs can no longer be dragged out of the main window into a floating window, which had no
+  toolbar or explorer of its own. Tabs left in such a window by an earlier version return to the
+  main area on start. Tabs can still be arranged side by side inside the window.
+- New query tabs take the lowest free number, so numbering starts at Query 1 again once the
+  numbered tabs are closed, also after a restart.
+
+### Fixed
+
+- With every tab closed the workspace was black; it now shows an empty page with New Query and
+  Welcome.
+- The close button of a tab no longer paints over the tab's border when hovered; the cross
+  turns red instead.
+- **View History** of a SQL Server Agent job failed with "Invalid column name 'retries'".
+- Resizing the window no longer fights back: Zephix stopped shrinking a window it judged too
+  tall for the screen, which undid snapping and dragging an edge.
+- On monitors with different scale factors the window could open off screen and at twice its
+  size, so its edges could not be reached. The window now opens centered on the primary
+  monitor with its last size (or maximized); the position is no longer remembered. The bad
+  position saved by earlier versions is removed on the first start.
+- A window too large for the screen opens maximized and restores to a centered size whose
+  title bar is on screen.
+
 ## 0.2.0 - 2026-10-26
 
 ### Added

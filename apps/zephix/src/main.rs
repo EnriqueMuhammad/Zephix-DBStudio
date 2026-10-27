@@ -39,6 +39,23 @@ fn app_config() -> AppConfig {
     }
 }
 
+/// Removes the window position that Zephix 0.2.0 and earlier saved; eframe restores it off
+/// screen when the monitors use different scale factors (see `rdbs_ui::strip_window_position`).
+fn forget_window_position() {
+    let Some(path) = eframe::storage_dir("zephix").map(|dir| dir.join("app.ron")) else {
+        return;
+    };
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return;
+    };
+    if let Some(fixed) = rdbs_ui::strip_window_position(&text) {
+        match std::fs::write(&path, fixed) {
+            Ok(()) => tracing::info!("removed the saved window position"),
+            Err(e) => tracing::warn!("could not update {}: {e}", path.display()),
+        }
+    }
+}
+
 fn main() -> eframe::Result {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -47,6 +64,7 @@ fn main() -> eframe::Result {
         )
         .init();
 
+    forget_window_position();
     let mut viewport = egui::ViewportBuilder::default()
         .with_title(rdbs_core::brand::APP_TITLE)
         .with_app_id("zephix");
@@ -56,9 +74,13 @@ fn main() -> eframe::Result {
     }
     let options = eframe::NativeOptions {
         viewport: viewport
-            .with_inner_size([1360.0, 840.0])
-            .with_min_inner_size([900.0, 560.0]),
-        persist_window: true,
+            .with_inner_size(rdbs_ui::PREFERRED)
+            .with_min_inner_size(rdbs_ui::MIN_SIZE),
+        // eframe would save the window position and restore it wrongly when the monitors use
+        // different scale factors (off screen, twice the size). The app saves the size and
+        // maximized state without a position instead; the window opens centered.
+        persist_window: false,
+        centered: true,
         ..Default::default()
     };
 

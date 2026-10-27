@@ -268,6 +268,109 @@ async fn object_tree_contains_tables_and_columns() {
     assert_eq!(details, ["bigint · PK", "nvarchar(20) · NOT NULL"]);
 }
 
+const PROG_CLEANUP: &str = "\
+    IF EXISTS (SELECT 1 FROM sys.triggers WHERE name = 'it_db_trigger' AND parent_class = 0) \
+        DROP TRIGGER it_db_trigger ON DATABASE; \
+    IF OBJECT_ID('it_prog.it_proc') IS NOT NULL DROP PROCEDURE it_prog.it_proc; \
+    IF OBJECT_ID('it_prog.it_seq') IS NOT NULL DROP SEQUENCE it_prog.it_seq; \
+    IF TYPE_ID('it_prog.it_type') IS NOT NULL DROP TYPE it_prog.it_type; \
+    IF SCHEMA_ID('it_prog') IS NOT NULL DROP SCHEMA it_prog; \
+    IF DATABASE_PRINCIPAL_ID('it_user') IS NOT NULL DROP USER it_user; \
+    IF DATABASE_PRINCIPAL_ID('it_role') IS NOT NULL DROP ROLE it_role;";
+
+#[tokio::test]
+async fn programmability_and_security_folders() {
+    let Some(mut s) = session().await else { return };
+    for sql in [
+        PROG_CLEANUP,
+        "CREATE SCHEMA it_prog",
+        "CREATE SEQUENCE it_prog.it_seq AS bigint START WITH 1",
+        "CREATE TYPE it_prog.it_type FROM int NOT NULL",
+        "CREATE PROCEDURE it_prog.it_proc AS SELECT 1",
+        // Fires only on CREATE SYNONYM, which no other test runs.
+        "CREATE TRIGGER it_db_trigger ON DATABASE FOR CREATE_SYNONYM AS RETURN",
+        "CREATE ROLE it_role",
+        "CREATE USER it_user WITHOUT LOGIN",
+    ] {
+        s.execute(sql, CancelHandle::new())
+            .await
+            .unwrap_or_else(|e| panic!("{sql}: {e}"));
+    }
+    let mut attempt = 0;
+    let tree = loop {
+        match s.load_objects().await {
+            Ok(tree) => break tree,
+            Err(e) if attempt < 3 => {
+                eprintln!("retrying load_objects after: {e}");
+                attempt += 1;
+                tokio::time::sleep(Duration::from_millis(300)).await;
+            }
+            Err(e) => panic!("objects: {e}"),
+        }
+    };
+    s.execute(PROG_CLEANUP, CancelHandle::new())
+        .await
+        .expect("cleanup");
+
+    let master = tree.iter().find(|d| d.name == "master").expect("master");
+    let folder = |top: &str, sub: &str| -> Vec<(String, Option<String>, ObjectKind)> {
+        master
+            .children
+            .iter()
+            .find(|f| f.kind == ObjectKind::Folder && f.name == top)
+            .unwrap_or_else(|| panic!("{top} folder"))
+            .children
+            .iter()
+            .find(|f| f.name == sub)
+            .unwrap_or_else(|| panic!("{top} > {sub}"))
+            .children
+            .iter()
+            .map(|o| (o.display_name(), o.detail.clone(), o.kind))
+            .collect()
+    };
+    let has = |list: &[(String, Option<String>, ObjectKind)], name: &str| {
+        list.iter().any(|(n, _, _)| n == name)
+    };
+
+    let procs = folder("Programmability", "Stored Procedures");
+    assert!(has(&procs, "it_prog.it_proc"), "{procs:?}");
+    assert!(procs.iter().all(|(_, _, k)| *k == ObjectKind::Procedure));
+    let types = folder("Programmability", "Types");
+    assert!(
+        types.contains(&(
+            "it_prog.it_type".into(),
+            Some("int".into()),
+            ObjectKind::CatalogEntry
+        )),
+        "{types:?}"
+    );
+    assert!(has(
+        &folder("Programmability", "Sequences"),
+        "it_prog.it_seq"
+    ));
+    assert!(has(
+        &folder("Programmability", "Database Triggers"),
+        "it_db_trigger"
+    ));
+    let users = folder("Security", "Users");
+    assert!(has(&users, "it_user") && has(&users, "dbo"), "{users:?}");
+    assert!(has(&folder("Security", "Roles"), "it_role"));
+    assert!(has(&folder("Security", "Schemas"), "it_prog"));
+    // Every category of SQL Server 2022 is readable: no "Not available" notice.
+    for top in ["Programmability", "Security"] {
+        let node = master.children.iter().find(|f| f.name == top).expect("top");
+        assert_eq!(node.children.len(), 9, "{top}");
+        for sub in &node.children {
+            assert!(
+                sub.children.iter().all(|o| o.kind != ObjectKind::Notice),
+                "{top} > {}: {:?}",
+                sub.name,
+                sub.children
+            );
+        }
+    }
+}
+
 const SETUP: &str = "IF OBJECT_ID('dbo.it_edit') IS NOT NULL DROP TABLE dbo.it_edit;     CREATE TABLE dbo.it_edit (id int PRIMARY KEY, name nvarchar(10));     INSERT INTO dbo.it_edit VALUES (1, N'a'), (2, N'b');";
 
 fn change(sql: &str) -> Change {

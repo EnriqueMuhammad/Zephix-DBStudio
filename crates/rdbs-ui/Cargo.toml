@@ -24,6 +24,7 @@ uuid.workspace = true
 chrono = { workspace = true, features = ["clock"] }
 directories.workspace = true
 tracing.workspace = true
+ron.workspace = true
 
 [lints]
 workspace = true

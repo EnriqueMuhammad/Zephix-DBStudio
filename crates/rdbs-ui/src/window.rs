@@ -1,13 +1,51 @@
-//! Keeps the window usable on small or high-DPI screens.
+//! Main window size: opens usable on small or high-DPI screens, and remembers its size.
 
-use egui::{Context, Vec2, ViewportCommand, vec2};
+use std::collections::HashMap;
+
+use egui::{Context, Pos2, Vec2, ViewportCommand, pos2, vec2};
+use serde::{Deserialize, Serialize};
 
 /// Room the taskbar takes at the edge of the monitor, in points.
 const TASKBAR: f32 = 48.0;
 /// Size of a restored window when the monitor has room for it, in points.
-const PREFERRED: Vec2 = vec2(1360.0, 840.0);
+pub const PREFERRED: Vec2 = vec2(1360.0, 840.0);
+/// Smallest inner size of the window, in points.
+pub const MIN_SIZE: Vec2 = vec2(900.0, 560.0);
 
-/// Keeps the window on its monitor; call it every frame.
+/// eframe's storage key for the window settings it restores at start-up.
+pub const EFRAME_WINDOW_KEY: &str = "window";
+
+/// The window settings eframe restores at start-up (its `WindowSettings`, same field names),
+/// without a position.
+///
+/// eframe's own `persist_window` also saves the position and restores it wrongly when the
+/// monitors use different scale factors: points and pixels get mixed up, and the window opens
+/// off screen at twice its size. With `persist_window` off, the app writes this instead, so the
+/// size and maximized state come back and the window opens centered on the primary monitor.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct WindowState {
+    /// Inner size of the restored (not maximized) window, in points.
+    pub inner_size_points: Option<Vec2>,
+    /// Whether the window was maximized.
+    pub maximized: bool,
+}
+
+/// Drops the position from eframe's window settings in the contents of its `app.ron` (a map
+/// of keys to RON text), keeping the size and maximized state. Settings written by Zephix 0.2.0
+/// and earlier carry a position; eframe reads them before the app starts, so they are fixed in
+/// the file. Returns the new contents, or `None` when nothing needs to change.
+pub fn strip_window_position(app_ron: &str) -> Option<String> {
+    let mut values: HashMap<String, String> = ron::from_str(app_ron).ok()?;
+    let saved = values.get(EFRAME_WINDOW_KEY)?;
+    if !saved.contains("position") {
+        return None;
+    }
+    let state: WindowState = ron::from_str(saved).ok()?;
+    values.insert(EFRAME_WINDOW_KEY.to_owned(), ron::to_string(&state).ok()?);
+    ron::ser::to_string_pretty(&values, ron::ser::PrettyConfig::default()).ok()
+}
+
+/// Watches the main window; call [`WindowFit::update`] every frame.
 #[derive(Debug, Default)]
 pub struct WindowFit {
     /// The size at start-up was checked.
@@ -16,17 +54,17 @@ pub struct WindowFit {
     /// since they are briefly wrong while the window opens, moves to another monitor or
     /// changes its DPI.
     last: Option<(Vec2, Vec2)>,
-    /// Outer size and the inner size already requested for it. A window manager that will
-    /// not shrink any further would otherwise be asked again on every frame.
-    clamp_request: Option<(Vec2, Vec2)>,
+    /// Inner size of the window when it was last neither maximized, minimized nor full screen.
+    restored: Option<Vec2>,
+    /// Whether the window is maximized.
+    maximized: bool,
 }
 
 impl WindowFit {
-    /// On the first frame, a window that does not fit its monitor (the default size on a small
-    /// or highly scaled screen, or a size remembered from a larger monitor) gets the preferred
-    /// size and opens maximized. After that, a resize the user makes is kept: a restored window
-    /// larger than the preferred size stays, and one that spills past the work area is only
-    /// clamped to that area.
+    /// On the first stable frame, a window that does not fit its monitor (the default size on a
+    /// small or highly scaled screen, or a size remembered from a larger monitor) gets a smaller
+    /// restored size and opens maximized. After that the window is never resized: the size the
+    /// user gives it is theirs.
     pub fn update(&mut self, ctx: &Context) {
         let (monitor, outer, inner, maximized, minimized, fullscreen) = ctx.input(|i| {
             let v = i.viewport();
@@ -39,67 +77,58 @@ impl WindowFit {
                 v.fullscreen,
             )
         });
-        let (Some(monitor), Some(outer)) = (monitor, outer) else {
-            return;
-        };
         if minimized == Some(true) || fullscreen == Some(true) {
             self.last = None;
             return;
         }
+        self.maximized = maximized == Some(true);
+        if !self.maximized
+            && let Some(inner) = inner
+        {
+            self.restored = Some(inner.size());
+        }
+        if self.started {
+            return;
+        }
+        let (Some(monitor), Some(outer)) = (monitor, outer) else {
+            return;
+        };
         let reading = (monitor, outer.size());
         if self.last != Some(reading) {
             self.last = Some(reading);
             ctx.request_repaint();
             return;
         }
-        if maximized == Some(true) {
-            self.started = true;
+        self.started = true;
+        if self.maximized || fits(outer.size(), monitor) {
             return;
         }
-        if !self.started {
-            self.started = true;
-            if !fits(outer.size(), monitor) {
-                let size = restored_size(monitor);
-                tracing::info!(
-                    "window {:.0}x{:.0} does not fit the {:.0}x{:.0} monitor; opening at {:.0}x{:.0}",
-                    outer.width(),
-                    outer.height(),
-                    monitor.x,
-                    monitor.y,
-                    size.x,
-                    size.y
-                );
-                ctx.send_viewport_cmd(ViewportCommand::InnerSize(size));
-                ctx.send_viewport_cmd(ViewportCommand::Maximized(true));
-                self.last = None;
-            }
-            return;
-        }
-        if fits(outer.size(), monitor) {
-            self.clamp_request = None;
-            return;
-        }
-        let Some(inner) = inner else {
-            return;
-        };
-        let size = clamp_inner(outer.size(), inner.size(), monitor);
-        // The same request again means the window manager kept this outer size.
-        // Asking every frame would repaint forever and never get closer.
-        if self.clamp_request == Some((outer.size(), size)) {
-            return;
-        }
-        self.clamp_request = Some((outer.size(), size));
+        let size = restored_size(monitor);
+        // The window was centered for its old, larger size, so its corner is off screen;
+        // the restored window is centered again. (It opens on the primary monitor, at 0,0.)
+        let chrome = inner.map_or(Vec2::ZERO, |inner| outer.size() - inner.size());
+        let position = centered(monitor, size + chrome);
         tracing::info!(
-            "window {:.0}x{:.0} is past the {:.0}x{:.0} work area; clamping the inner size to {:.0}x{:.0}",
+            "window {:.0}x{:.0} does not fit the {:.0}x{:.0} monitor; opening maximized, restored at {:.0}x{:.0}",
             outer.width(),
             outer.height(),
             monitor.x,
-            monitor.y - TASKBAR,
+            monitor.y,
             size.x,
             size.y
         );
         ctx.send_viewport_cmd(ViewportCommand::InnerSize(size));
-        self.last = None;
+        ctx.send_viewport_cmd(ViewportCommand::OuterPosition(position));
+        ctx.send_viewport_cmd(ViewportCommand::Maximized(true));
+        self.restored = Some(size);
+    }
+
+    /// What to remember for the next run, once the window has been seen.
+    pub fn state(&self) -> Option<WindowState> {
+        self.restored.map(|size| WindowState {
+            inner_size_points: Some(size.max(MIN_SIZE)),
+            maximized: self.maximized,
+        })
     }
 }
 
@@ -108,8 +137,17 @@ fn fits(outer: Vec2, monitor: Vec2) -> bool {
     outer.x <= monitor.x && outer.y <= monitor.y - TASKBAR
 }
 
+/// Top-left corner that centers a window of `outer` size in the work area of a monitor of
+/// `monitor` size, never above or left of the screen.
+fn centered(monitor: Vec2, outer: Vec2) -> Pos2 {
+    pos2(
+        ((monitor.x - outer.x) / 2.0).max(0.0),
+        ((monitor.y - TASKBAR - outer.y) / 2.0).max(0.0),
+    )
+}
+
 /// Inner size of a restored window on a monitor of `monitor` size: the preferred size, or less
-/// so the title bar and the taskbar still fit. Used only for the first frame.
+/// so the title bar and the taskbar still fit.
 fn restored_size(monitor: Vec2) -> Vec2 {
     vec2(
         PREFERRED.x.min(monitor.x * 0.9),
@@ -117,20 +155,16 @@ fn restored_size(monitor: Vec2) -> Vec2 {
     )
 }
 
-/// Inner size that brings an outer window of `outer` (content size `inner`) back inside the
-/// work area, keeping the title-bar chrome. A window that is merely larger than
-/// [`PREFERRED`] is left at that larger size.
-fn clamp_inner(outer: Vec2, inner: Vec2, monitor: Vec2) -> Vec2 {
-    let max_outer = vec2(monitor.x, (monitor.y - TASKBAR).max(1.0));
-    let overflow = (outer - max_outer).max(Vec2::ZERO);
-    (inner - overflow).max(vec2(480.0, 320.0))
-}
-
 #[cfg(test)]
 mod tests {
     use egui::vec2;
 
-    use super::{PREFERRED, clamp_inner, fits, restored_size};
+    use std::collections::HashMap;
+
+    use super::{
+        EFRAME_WINDOW_KEY, MIN_SIZE, PREFERRED, WindowFit, centered, fits, restored_size,
+        strip_window_position,
+    };
 
     #[test]
     fn small_screens_get_a_smaller_window() {
@@ -143,24 +177,59 @@ mod tests {
 
         let size = restored_size(vec2(1440.0, 810.0));
         assert!(fits(size + vec2(13.0, 40.0), vec2(1440.0, 810.0)));
-        assert_eq!(restored_size(vec2(1920.0, 1080.0)), vec2(1360.0, 840.0));
-    }
-
-    #[test]
-    fn a_user_resize_past_the_preferred_size_is_only_clamped_to_the_work_area() {
-        let monitor = vec2(1920.0, 1080.0);
-        let outer = vec2(1920.0, 1080.0);
-        let inner = vec2(1900.0, 1040.0);
-        assert!(!fits(outer, monitor));
-        let clamped = clamp_inner(outer, inner, monitor);
-        // 48 points of height spill past the taskbar allowance, and nothing else.
-        assert_eq!(clamped, vec2(1900.0, 992.0));
-        assert!(clamped.y > PREFERRED.y);
+        // Centered on screen, the title bar reachable.
+        let corner = centered(vec2(1440.0, 810.0), size + vec2(13.0, 40.0));
+        assert!(corner.x > 0.0 && corner.y > 0.0);
+        assert_eq!(
+            centered(vec2(800.0, 600.0), vec2(1000.0, 700.0)),
+            egui::pos2(0.0, 0.0)
+        );
+        assert_eq!(restored_size(vec2(1920.0, 1080.0)), PREFERRED);
     }
 
     #[test]
     fn a_large_window_that_fits_the_work_area_is_not_resized() {
         assert!(fits(vec2(1600.0, 900.0), vec2(1920.0, 1200.0)));
         assert!(fits(vec2(1360.0, 840.0), vec2(1920.0, 1080.0)));
+    }
+
+    #[test]
+    fn saved_settings_have_no_position() {
+        let fit = WindowFit {
+            restored: Some(vec2(300.0, 200.0)),
+            ..WindowFit::default()
+        };
+        let state = fit.state().expect("state");
+        assert_eq!(state.inner_size_points, Some(MIN_SIZE));
+        // eframe reads these field names; positions are absent, so it centers the window.
+        let text = ron::to_string(&state).expect("ron");
+        assert_eq!(
+            text,
+            "(inner_size_points:Some((x:900.0,y:560.0)),maximized:false)"
+        );
+        assert_eq!(WindowFit::default().state(), None);
+    }
+
+    #[test]
+    fn old_settings_lose_their_position_only() {
+        // As written by Zephix 0.2.0 on a two-monitor setup (200 % and 100 %).
+        let old = r#"{
+    "window": "(inner_position_pixels:Some((x:2935.0,y:350.0)),outer_position_pixels:Some((x:2927.0,y:319.0)),fullscreen:false,maximized:false,inner_size_points:Some((x:1800.0,y:993.0)))",
+    "rdbs.light_theme": "false",
+}"#;
+        let fixed = strip_window_position(old).expect("changed");
+        let values: HashMap<String, String> = ron::from_str(&fixed).expect("ron");
+        assert_eq!(
+            values[EFRAME_WINDOW_KEY],
+            "(inner_size_points:Some((x:1800.0,y:993.0)),maximized:false)"
+        );
+        assert_eq!(values["rdbs.light_theme"], "false");
+        // Already clean, missing, or unreadable: left alone.
+        assert_eq!(strip_window_position(&fixed), None);
+        assert_eq!(
+            strip_window_position(r#"{"rdbs.light_theme": "true"}"#),
+            None
+        );
+        assert_eq!(strip_window_position("not ron"), None);
     }
 }

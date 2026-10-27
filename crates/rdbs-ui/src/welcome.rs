@@ -12,6 +12,7 @@ use crate::workspace::TabContext;
 pub const SHORTCUTS: &[(&str, &str)] = &[
     ("Ctrl+N", "New connection"),
     ("Ctrl+T", "New query tab"),
+    ("Ctrl+O / Ctrl+S", "Open / save a query file"),
     ("Ctrl+Enter / Ctrl+R", "Run query or selection"),
     ("Ctrl+Space", "Autocomplete"),
     ("Ctrl+W", "Close tab"),

@@ -32,7 +32,7 @@ pub fn paint_kind_badge(ui: &Ui, rect: egui::Rect, kind: DatabaseKind) {
 /// Small coloured environment label, e.g. "PROD". Nothing is shown for Development.
 pub fn env_pill(ui: &mut Ui, env: Environment) {
     let text = match env {
-        Environment::Development => return,
+        Environment::Development => "DEV",
         Environment::Staging => "STAGING",
         Environment::Production => "PROD",
     };

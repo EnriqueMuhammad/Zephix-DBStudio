@@ -58,11 +58,29 @@ impl Workspace {
     ) -> u64 {
         let id = self.next_tab_id;
         self.next_tab_id += 1;
+        let title = title.unwrap_or_else(|| format!("Query {}", self.free_query_number()));
         self.dock
             .push_to_focused_leaf(Tab::Query(Box::new(QueryTab::new(
-                id, profile_id, sql, title,
+                id,
+                profile_id,
+                sql,
+                Some(title),
             ))));
         id
+    }
+
+    /// Lowest number not used by an open "Query N" tab, so numbering starts at 1 again once
+    /// those tabs are closed (also across restarts). Tab ids stay unique regardless.
+    fn free_query_number(&self) -> u64 {
+        let used: std::collections::HashSet<u64> = self
+            .dock
+            .iter_all_tabs()
+            .filter_map(|(_, tab)| match tab {
+                Tab::Query(q) => q.title.strip_prefix("Query ")?.parse().ok(),
+                _ => None,
+            })
+            .collect();
+        (1..).find(|n| !used.contains(n)).unwrap_or(1)
     }
 
     /// Finds a query tab by id.
@@ -73,6 +91,57 @@ impl Workspace {
                 Tab::Query(q) if q.id == id => Some(q.as_mut()),
                 _ => None,
             })
+    }
+
+    /// Moves tabs out of floating windows back into the main area. Tabs cannot be dragged out
+    /// any more, but workspaces saved by earlier versions may still have such windows.
+    pub fn dock_floating_tabs(&mut self) {
+        let windows: Vec<egui_dock::SurfaceIndex> = self
+            .dock
+            .iter_surfaces_indexed()
+            .map(|(index, _)| index)
+            .filter(|index| !index.is_main())
+            .collect();
+        for index in windows.into_iter().rev() {
+            let Some(mut surface) = self.dock.remove_surface(index) else {
+                continue;
+            };
+            let tabs: Vec<Tab> = surface
+                .iter_nodes_mut()
+                .filter_map(|node| node.get_leaf_mut())
+                .flat_map(|leaf| std::mem::take(&mut leaf.tabs))
+                .collect();
+            for tab in tabs {
+                self.dock.push_to_first_leaf(tab);
+            }
+        }
+    }
+
+    /// Ids and titles of the query tabs with unsaved changes, in tab order.
+    pub fn unsaved_tabs(&self) -> Vec<(u64, String)> {
+        self.dock
+            .iter_all_tabs()
+            .filter_map(|(_, tab)| match tab {
+                Tab::Query(q) if q.is_dirty() => Some((q.id, q.title.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The open query tab for a file, if any.
+    pub fn tab_for_path(&self, path: &std::path::Path) -> Option<u64> {
+        self.dock.iter_all_tabs().find_map(|(_, tab)| match tab {
+            Tab::Query(q) if q.path.as_deref() == Some(path) => Some(q.id),
+            _ => None,
+        })
+    }
+
+    /// Makes a tab active and focuses its panel.
+    pub fn focus_tab(&mut self, key: u64) {
+        if let Some(path) = self.dock.find_tab_from(|t| t.key() == key) {
+            let _ = self.dock.set_active_tab(path);
+            self.dock.set_focused_node_and_surface(path.node_path());
+        }
     }
 
     /// Finds the query tab waiting for `request_id`.
@@ -119,18 +188,20 @@ impl Workspace {
         }
     }
 
-    /// Closes the active tab of the focused leaf and returns it.
-    pub fn close_active_tab(&mut self) -> Option<Tab> {
-        let key = self.dock.find_active_focused().map(|(_, t)| t.key())?;
-        let path = self.dock.find_tab_from(|t| t.key() == key)?;
-        self.dock.remove_tab(path)
-    }
-
     /// Closes the tabs `which` selects and returns them. After "close others" the kept tab is
     /// active and focused.
     pub fn close_tabs(&mut self, which: TabClose) -> Vec<Tab> {
+        self.close_where(which, |_| true)
+    }
+
+    /// Closes the tabs `which` selects for which `close` holds (unsaved scripts wait for a
+    /// decision instead), and returns them.
+    pub fn close_where(&mut self, which: TabClose, close: impl Fn(&Tab) -> bool) -> Vec<Tab> {
         let mut closed = Vec::new();
-        while let Some(path) = self.dock.find_tab_from(|t| which.closes(t.key())) {
+        while let Some(path) = self
+            .dock
+            .find_tab_from(|t| which.closes(t.key()) && close(t))
+        {
             match self.dock.remove_tab(path) {
                 Some(tab) => closed.push(tab),
                 None => break,
@@ -330,7 +401,8 @@ impl Tab {
                 } else {
                     icon::FILE_SQL
                 };
-                format!("{glyph}  {}", q.title)
+                let dirty = if q.is_dirty() { "*" } else { "" };
+                format!("{glyph}  {}{dirty}", q.title)
             }
         }
     }
@@ -516,6 +588,13 @@ pub struct QueryTab {
     pub data_view: Option<DataView>,
     /// Editor contents.
     pub sql: String,
+    /// File the script was opened from or last saved to.
+    #[serde(default)]
+    pub path: Option<std::path::PathBuf>,
+    /// Contents as last opened, saved or generated; the tab has unsaved changes when `sql`
+    /// differs. Tabs restored from older versions have none, so their text counts as unsaved.
+    #[serde(default)]
+    pub saved: String,
     /// Execution state (not persisted).
     #[serde(skip)]
     pub run: RunState,
@@ -531,12 +610,29 @@ impl QueryTab {
             database: None,
             table: None,
             data_view: None,
+            saved: sql.clone(),
             sql,
+            path: None,
             run: RunState {
                 focus_editor: true,
                 ..RunState::default()
             },
         }
+    }
+
+    /// Whether the script differs from what was last opened, saved or generated. Data tabs
+    /// have no script of their own.
+    pub fn is_dirty(&self) -> bool {
+        self.data_view.is_none() && self.sql != self.saved
+    }
+
+    /// Records that the script now lives in `path` with the current contents.
+    pub fn mark_saved(&mut self, path: std::path::PathBuf) {
+        if let Some(name) = path.file_name() {
+            self.title = name.to_string_lossy().into_owned();
+        }
+        self.path = Some(path);
+        self.saved = self.sql.clone();
     }
 
     /// Egui id of this tab's text editor.
@@ -726,6 +822,13 @@ impl TabViewer for TabContext<'_> {
     }
 
     fn on_close(&mut self, tab: &mut Tab) -> OnCloseResponse {
+        // Unsaved scripts go through the application, which asks whether to save.
+        if let Tab::Query(q) = tab
+            && q.is_dirty()
+        {
+            self.actions.push(UiAction::CloseTabs(TabClose::One(q.id)));
+            return OnCloseResponse::Ignore;
+        }
         if let Tab::Query(q) = tab
             && let Some(running) = &q.run.running
         {
@@ -748,9 +851,27 @@ impl TabViewer for TabContext<'_> {
                 response.clone().on_hover_text(full.clone());
             }
         }
+        if let Tab::Query(q) = tab
+            && let Some(path) = &q.path
+        {
+            response.clone().on_hover_text(path.display().to_string());
+        }
         // Replaces egui_dock's own tab menu (see `DockArea::tab_context_menus`).
         let key = tab.key();
+        let script = matches!(tab, Tab::Query(q) if q.data_view.is_none());
         response.context_menu(|ui| {
+            if script {
+                for (label, save_as) in [("Save", false), ("Save As…", true)] {
+                    if ui.button(label).clicked() {
+                        self.actions.push(UiAction::SaveQuery {
+                            tab_id: Some(key),
+                            save_as,
+                        });
+                        ui.close();
+                    }
+                }
+                ui.separator();
+            }
             for (label, which) in [
                 ("Close Tab", TabClose::One(key)),
                 ("Close Other Tabs", TabClose::Others(key)),
@@ -762,6 +883,11 @@ impl TabViewer for TabContext<'_> {
                 }
             }
         });
+    }
+
+    fn allowed_in_windows(&self, _tab: &mut Tab) -> bool {
+        // A floating window has no toolbar, explorer or menus of its own; tabs stay docked.
+        false
     }
 
     fn on_add(&mut self, _path: egui_dock::NodePath) {
@@ -789,6 +915,102 @@ mod tests {
 
     fn keys(w: &Workspace) -> Vec<u64> {
         w.dock.iter_all_tabs().map(|(_, t)| t.key()).collect()
+    }
+
+    fn query_titles(w: &Workspace) -> Vec<String> {
+        w.dock
+            .iter_all_tabs()
+            .filter_map(|(_, t)| match t {
+                Tab::Query(q) => Some(q.title.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn unsaved_changes_are_tracked_per_tab() {
+        let mut w = Workspace::default(); // Welcome and Query 1 with the sample script
+        let scratch = w.open_query_tab(None, String::new(), None);
+        let ddl = w.open_query_tab(None, "CREATE TABLE t (id int)".into(), Some("t".into()));
+        let tab = |w: &mut Workspace, id| w.query_tab_mut(id).expect("tab").is_dirty();
+        // Generated or empty scripts start out unchanged.
+        assert!(!tab(&mut w, 1) && !tab(&mut w, scratch) && !tab(&mut w, ddl));
+
+        w.query_tab_mut(scratch).expect("tab").sql = "SELECT 1".into();
+        assert!(tab(&mut w, scratch));
+        let heading = w
+            .dock
+            .iter_all_tabs()
+            .find(|(_, t)| t.key() == scratch)
+            .map(|(_, t)| t.heading())
+            .expect("heading");
+        assert!(heading.ends_with("Query 2*"), "{heading}");
+
+        let q = w.query_tab_mut(scratch).expect("tab");
+        q.mark_saved(std::path::PathBuf::from("C:/sql/report.sql"));
+        assert!(!q.is_dirty());
+        assert_eq!(q.title, "report.sql");
+        assert_eq!(
+            w.tab_for_path(std::path::Path::new("C:/sql/report.sql")),
+            Some(scratch)
+        );
+
+        assert_eq!(w.unsaved_tabs(), Vec::<(u64, String)>::new());
+        w.query_tab_mut(1).expect("tab").sql.push(' ');
+        assert_eq!(w.unsaved_tabs(), [(1, "Query 1".to_owned())]);
+        w.query_tab_mut(1).expect("tab").sql.pop();
+
+        // Closing everything leaves the changed tab open.
+        w.query_tab_mut(ddl)
+            .expect("tab")
+            .sql
+            .push_str(", name text");
+        let closed = w.close_where(
+            TabClose::All,
+            |t| !matches!(t, Tab::Query(q) if q.is_dirty()),
+        );
+        assert_eq!(closed.len(), 3);
+        assert_eq!(keys(&w), [ddl]);
+    }
+
+    #[test]
+    fn floating_windows_are_docked_again() {
+        let mut w = Workspace::default(); // Welcome and Query 1
+        let q = QueryTab::new(7, None, "SELECT 7".into(), None);
+        w.dock.add_window(vec![Tab::Query(Box::new(q))]);
+        assert_eq!(w.dock.iter_surfaces().count(), 2);
+        w.dock_floating_tabs();
+        let main: Vec<u64> = w.dock.main_surface().tabs().map(Tab::key).collect();
+        assert_eq!(main, [0, 1, 7]);
+        assert!(
+            w.dock
+                .iter_surfaces()
+                .all(|s| !matches!(s, egui_dock::Surface::Window(..)))
+        );
+    }
+
+    #[test]
+    fn query_numbers_restart_at_one() {
+        // Welcome and Query 1, after a long session.
+        let mut w = Workspace {
+            next_tab_id: 57,
+            ..Workspace::default()
+        };
+        let a = w.open_query_tab(None, String::new(), None);
+        let b = w.open_query_tab(None, String::new(), None);
+        assert_eq!(query_titles(&w), ["Query 1", "Query 2", "Query 3"]);
+        assert_eq!((a, b), (57, 58), "ids stay unique");
+
+        // A gap is filled first.
+        w.close_tabs(TabClose::One(a));
+        w.open_query_tab(None, String::new(), None);
+        assert_eq!(query_titles(&w), ["Query 1", "Query 3", "Query 2"]);
+
+        // Everything closed: back to 1. Named tabs do not take a number.
+        w.close_tabs(TabClose::All);
+        w.open_query_tab(None, String::new(), Some("customers".into()));
+        w.open_query_tab(None, String::new(), None);
+        assert_eq!(query_titles(&w), ["customers", "Query 1"]);
     }
 
     #[test]

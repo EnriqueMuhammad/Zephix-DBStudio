@@ -14,6 +14,7 @@ mod batch;
 mod catalog;
 mod ddl;
 mod describe;
+mod folders;
 mod showplan;
 mod values;
 

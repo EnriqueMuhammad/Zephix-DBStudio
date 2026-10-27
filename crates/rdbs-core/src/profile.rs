@@ -170,6 +170,15 @@ impl Environment {
         Environment::Production,
     ];
 
+    /// Short badge text.
+    pub fn short(self) -> &'static str {
+        match self {
+            Environment::Development => "DEV",
+            Environment::Staging => "STG",
+            Environment::Production => "PROD",
+        }
+    }
+
     /// Human readable label.
     pub fn label(self) -> &'static str {
         match self {

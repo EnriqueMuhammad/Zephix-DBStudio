@@ -6,6 +6,14 @@ use serde::{Deserialize, Serialize};
 /// of a PostgreSQL or SQL Server instance). The explorer loads them on demand.
 pub const NOT_LOADED: &str = "not connected";
 
+/// SQL Server folder of a database with its procedures, functions, triggers, types, rules,
+/// defaults, plan guides and sequences.
+pub const PROGRAMMABILITY_FOLDER: &str = "Programmability";
+
+/// SQL Server folder of a database with its users, roles, schemas, keys, certificates, audit
+/// specifications and security policies.
+pub const SECURITY_FOLDER: &str = "Security";
+
 /// Kind of a database object.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ObjectKind {
@@ -34,6 +42,9 @@ pub enum ObjectKind {
     AgentJob,
     /// An informational leaf, such as why SQL Server Agent could not be read.
     Notice,
+    /// A catalog entry listed for reference (a user, role, key, type, rule…). It has no
+    /// actions besides copying its name.
+    CatalogEntry,
 }
 
 impl ObjectKind {
@@ -62,6 +73,10 @@ pub struct DbObject {
     /// running and each step here so the context menu does not need another query.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub notes: Vec<String>,
+    /// Schema of an object listed outside its schema node (SQL Server's Programmability
+    /// folder lists `dbo.name`). Objects under a schema node leave it empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema: Option<String>,
 }
 
 impl DbObject {
@@ -73,6 +88,22 @@ impl DbObject {
             detail: None,
             children: Vec::new(),
             notes: Vec::new(),
+            schema: None,
+        }
+    }
+
+    /// Builder-style schema setter, for objects listed outside their schema node.
+    #[must_use]
+    pub fn with_schema(mut self, schema: impl Into<String>) -> Self {
+        self.schema = Some(schema.into());
+        self
+    }
+
+    /// Name as shown in the tree: `schema.name` when the object carries its schema.
+    pub fn display_name(&self) -> String {
+        match &self.schema {
+            Some(schema) => format!("{schema}.{}", self.name),
+            None => self.name.clone(),
         }
     }
 

@@ -12,6 +12,7 @@ mod grid;
 mod history;
 mod model;
 mod plan;
+mod scripts;
 pub mod theme;
 mod tools;
 mod welcome;
@@ -20,3 +21,4 @@ mod window;
 mod workspace;
 
 pub use app::{AppConfig, InitError, StudioApp};
+pub use window::{MIN_SIZE, PREFERRED, strip_window_position};

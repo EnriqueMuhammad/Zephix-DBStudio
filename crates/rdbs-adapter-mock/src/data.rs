@@ -487,6 +487,10 @@ pub fn sample_objects(kind: DatabaseKind) -> Vec<DbObject> {
                     })
                     .collect()
             };
+            let mut children = children;
+            if kind == DatabaseKind::SqlServer {
+                children.extend(sql_server_folders());
+            }
             DbObject::new(*db, ObjectKind::Database).with_children(children)
         })
         .collect();
@@ -497,6 +501,94 @@ pub fn sample_objects(kind: DatabaseKind) -> Vec<DbObject> {
         ));
     }
     tree
+}
+
+/// Demo Programmability and Security folders of a SQL Server database.
+fn sql_server_folders() -> Vec<DbObject> {
+    use rdbs_core::schema::{PROGRAMMABILITY_FOLDER, SECURITY_FOLDER};
+    let entry = |schema: &str, name: &str, kind: ObjectKind, detail: &str| {
+        let mut obj = DbObject::new(name, kind);
+        if !schema.is_empty() {
+            obj = obj.with_schema(schema);
+        }
+        if detail.is_empty() {
+            obj
+        } else {
+            obj.with_detail(detail)
+        }
+    };
+    let catalog = |items: &[(&str, &str, &str)]| -> Vec<DbObject> {
+        items
+            .iter()
+            .map(|(schema, name, detail)| entry(schema, name, ObjectKind::CatalogEntry, detail))
+            .collect()
+    };
+    let sub = |name: &str, items: Vec<DbObject>| folder(name, items);
+    vec![
+        folder(
+            PROGRAMMABILITY_FOLDER,
+            vec![
+                sub(
+                    "Stored Procedures",
+                    vec![
+                        entry("dbo", "archive_orders", ObjectKind::Procedure, ""),
+                        entry("dbo", "refresh_statistics", ObjectKind::Procedure, ""),
+                    ],
+                ),
+                sub(
+                    "Functions",
+                    vec![
+                        entry("dbo", "calc_tax", ObjectKind::Function, "scalar"),
+                        entry("dbo", "customer_tier", ObjectKind::Function, "scalar"),
+                    ],
+                ),
+                sub("Database Triggers", catalog(&[("", "audit_ddl", "")])),
+                sub("Assemblies", Vec::new()),
+                sub(
+                    "Types",
+                    catalog(&[
+                        ("dbo", "OrderLines", "table type"),
+                        ("dbo", "Phone", "varchar"),
+                    ]),
+                ),
+                sub("Rules", Vec::new()),
+                sub("Defaults", Vec::new()),
+                sub("Plan Guides", Vec::new()),
+                sub("Sequences", catalog(&[("dbo", "invoice_no", "bigint")])),
+            ],
+        ),
+        folder(
+            SECURITY_FOLDER,
+            vec![
+                sub(
+                    "Users",
+                    catalog(&[
+                        ("", "dbo", "sql user"),
+                        ("", "guest", "sql user"),
+                        ("", "report_reader", "sql user"),
+                    ]),
+                ),
+                sub(
+                    "Roles",
+                    catalog(&[
+                        ("", "db_datareader", "database role"),
+                        ("", "db_owner", "database role"),
+                        ("", "public", "database role"),
+                    ]),
+                ),
+                sub(
+                    "Schemas",
+                    catalog(&[("", "dbo", "owner dbo"), ("", "sales", "owner dbo")]),
+                ),
+                sub("Asymmetric Keys", Vec::new()),
+                sub("Certificates", Vec::new()),
+                sub("Symmetric Keys", Vec::new()),
+                sub("Always Encrypted Keys", Vec::new()),
+                sub("Database Audit Specifications", Vec::new()),
+                sub("Security Policies", Vec::new()),
+            ],
+        ),
+    ]
 }
 
 /// Demo SQL Server Agent jobs, matching what a Developer edition would list.
