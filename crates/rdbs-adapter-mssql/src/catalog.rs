@@ -138,14 +138,13 @@ pub async fn load(client: &mut MssqlClient) -> Result<Vec<DbObject>, DbError> {
         }
     }
 
-    let mut schema_nodes = Some(
-        contents
-            .into_iter()
-            .map(|(name, c)| {
-                DbObject::new(name, ObjectKind::Schema).with_children(c.into_folders())
-            })
-            .collect::<Vec<_>>(),
-    );
+    let mut schema_nodes: Vec<DbObject> = contents
+        .into_iter()
+        .map(|(name, c)| DbObject::new(name, ObjectKind::Schema).with_children(c.into_folders()))
+        .collect();
+    // Programmability and Security follow the schemas, as database-level folders.
+    schema_nodes.extend(crate::folders::load(client).await);
+    let mut schema_nodes = Some(schema_nodes);
     let mut tree: Vec<DbObject> = databases
         .iter()
         .map(|r| {

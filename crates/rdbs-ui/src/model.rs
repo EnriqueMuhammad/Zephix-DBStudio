@@ -203,8 +203,17 @@ pub enum UiAction {
     Status(StatusMessage),
     /// Toggle the explorer sidebar.
     ToggleSidebar,
-    /// Close one tab, all others or all of them.
+    /// Close one tab, all others or all of them. Tabs with unsaved changes ask first.
     CloseTabs(TabClose),
+    /// Ask for a `.sql` file and open it in a query tab.
+    OpenQueryFile,
+    /// Save a query tab (the active one when `None`) to its file, or ask for one.
+    SaveQuery {
+        /// Tab id.
+        tab_id: Option<u64>,
+        /// Always ask for the file name.
+        save_as: bool,
+    },
 }
 
 /// Which tabs a close request removes; tabs are identified by [`crate::workspace::Tab::key`].

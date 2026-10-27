@@ -29,6 +29,8 @@ pub struct ExplorerState {
     pub selected_profile: Option<ProfileId>,
     /// Request keyboard focus for the filter box next frame.
     pub focus_filter: bool,
+    /// Name filters of folders (Tables, Procedures, ...) by node key, as typed.
+    folder_filters: HashMap<String, String>,
 }
 
 impl ExplorerState {
@@ -162,9 +164,8 @@ fn profile_node(
         } else {
             color::text_dim()
         };
-        let shows_env = profile.environment != rdbs_core::Environment::Development;
         let right_limit = rect.right() - 22.0;
-        let name_width = (right_limit - if shows_env { 36.0 } else { 0.0 } - x).max(8.0);
+        let name_width = (right_limit - 36.0 - x).max(8.0);
         let name = fit_label(
             ui,
             &profile.name,
@@ -180,17 +181,12 @@ fn profile_node(
             text_color,
         );
         x += painted.x + 6.0;
-        if shows_env && x + 28.0 <= right_limit {
+        if x + 28.0 <= right_limit {
             let c = theme::env_color(profile.environment);
-            let label = if profile.environment == rdbs_core::Environment::Production {
-                "PROD"
-            } else {
-                "STG"
-            };
             painter.text(
                 egui::pos2(x, rect.center().y),
                 Align2::LEFT_CENTER,
-                label,
+                profile.environment.short(),
                 FontId::proportional(9.5),
                 c,
             );
@@ -417,7 +413,14 @@ fn object_node(
         && obj.children.is_empty()
         && obj.detail.as_deref() == Some(rdbs_core::schema::NOT_LOADED);
     let is_loading = lazy && loading.is_some_and(|l| l.contains(&obj.name));
-    let key = format!("{parent_key}/{}", obj.name);
+    let shown_name = obj.display_name();
+    let key = format!("{parent_key}/{shown_name}");
+    // A folder filter keeps the children whose name contains the text.
+    let folder_filter = state
+        .folder_filters
+        .get(&key)
+        .map(|f| f.trim().to_lowercase())
+        .filter(|f| !f.is_empty());
     let expandable = !obj.children.is_empty() || lazy;
     let open = expandable && (state.expanded.contains(&key) || (!needle.is_empty() && !lazy));
     let (glyph, glyph_color) = object_icon(obj);
@@ -442,8 +445,12 @@ fn object_node(
         let available = (rect.right() - 4.0 - name_x).max(0.0);
         let name_font = FontId::proportional(13.0);
         let detail_font = FontId::proportional(11.0);
-        let detail = obj.detail.as_deref().filter(|text| !text.is_empty());
-        let name_natural = label_width(ui, &obj.name, name_font.clone());
+        let filter_note = folder_filter.as_ref().map(|f| format!("filter: {f}"));
+        let detail = filter_note
+            .as_deref()
+            .or(obj.detail.as_deref())
+            .filter(|text| !text.is_empty());
+        let name_natural = label_width(ui, &shown_name, name_font.clone());
         let detail_natural = detail
             .map(|text| label_width(ui, text, detail_font.clone()))
             .unwrap_or(0.0);
@@ -453,7 +460,7 @@ fn object_node(
         } else {
             available
         };
-        let name = fit_label(ui, &obj.name, name_font, color::text(), name_budget);
+        let name = fit_label(ui, &shown_name, name_font, color::text(), name_budget);
         let name_pos = egui::pos2(name_x, rect.center().y - name.size().y / 2.0);
         let painted_name = name.size().x;
         painter.galley(name_pos, name, color::text());
@@ -483,7 +490,7 @@ fn object_node(
     let reference = ObjectRef {
         profile_id: path.profile_id,
         database: path.database.clone(),
-        schema: path.schema.clone(),
+        schema: obj.schema.clone().or_else(|| path.schema.clone()),
         name: obj.name.clone(),
         kind: obj.kind,
     };
@@ -502,8 +509,8 @@ fn object_node(
     let object_ref = obj.kind.is_queryable().then_some(reference);
 
     let hover = match obj.detail.as_deref() {
-        Some(detail) if !detail.is_empty() => format!("{}\n{detail}", obj.name),
-        _ => obj.name.clone(),
+        Some(detail) if !detail.is_empty() => format!("{shown_name}\n{detail}"),
+        _ => shown_name.clone(),
     };
     let response = response.on_hover_text(hover);
     if response.clicked() || response.secondary_clicked() {
@@ -537,6 +544,13 @@ fn object_node(
     }
 
     response.context_menu(|ui| {
+        if matches!(
+            obj.kind,
+            ObjectKind::Folder | ObjectKind::Schema | ObjectKind::Database
+        ) && !lazy
+        {
+            container_menu(ui, state, obj, &key, path, actions);
+        }
         object_menu(
             ui,
             obj,
@@ -553,7 +567,11 @@ fn object_node(
         if is_loading {
             hint_row(ui, depth + 1, "Loading…", color::text_dim());
         }
-        for child in &obj.children {
+        for child in obj.children.iter().filter(|child| {
+            folder_filter
+                .as_ref()
+                .is_none_or(|f| child.display_name().to_lowercase().contains(f.as_str()))
+        }) {
             object_node(
                 ui,
                 state,
@@ -566,6 +584,92 @@ fn object_node(
                 loading,
             );
         }
+    }
+}
+
+/// Filter (folders) and Refresh for nodes that hold other objects.
+fn container_menu(
+    ui: &mut Ui,
+    state: &mut ExplorerState,
+    obj: &DbObject,
+    key: &str,
+    path: &PathCtx,
+    actions: &mut Vec<UiAction>,
+) {
+    if obj.kind == ObjectKind::Folder {
+        let active = state
+            .folder_filters
+            .get(key)
+            .is_some_and(|f| !f.trim().is_empty());
+        let label = if active {
+            format!("{}  Filter (on)", icon::FUNNEL)
+        } else {
+            format!("{}  Filter", icon::FUNNEL)
+        };
+        ui.menu_button(label, |ui| {
+            ui.label(RichText::new("Name contains").color(color::text_dim()));
+            let text = state.folder_filters.entry(key.to_owned()).or_default();
+            let edit = ui.add(
+                egui::TextEdit::singleline(text)
+                    .hint_text("e.g. order")
+                    .desired_width(180.0),
+            );
+            if ui.memory(|m| m.focused().is_none()) {
+                edit.request_focus();
+            }
+            if edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                ui.close();
+            }
+            if ui
+                .add_enabled(
+                    !text.trim().is_empty(),
+                    egui::Button::new(format!("{}  Remove Filter", icon::FUNNEL_X)),
+                )
+                .clicked()
+            {
+                text.clear();
+                ui.close();
+            }
+            // Open the folder so the filtered list shows right away.
+            if edit.changed() && !text.trim().is_empty() {
+                state.expanded.insert(key.to_owned());
+            }
+        })
+        .response
+        .on_hover_text("Show only the objects whose name contains a text");
+    }
+    if ui
+        .button(format!("{}  Refresh", icon::ARROWS_CLOCKWISE))
+        .on_hover_text("Read the objects of this database again")
+        .clicked()
+    {
+        actions.push(refresh_action(path, obj));
+        ui.close();
+    }
+    ui.separator();
+}
+
+/// Reloads the database a node belongs to; engines without lazily loaded databases reload the
+/// whole connection.
+fn refresh_action(path: &PathCtx, obj: &DbObject) -> UiAction {
+    let database = if obj.kind == ObjectKind::Database {
+        Some(obj.name.clone())
+    } else {
+        path.database.clone()
+    };
+    match database {
+        Some(database)
+            if matches!(
+                path.kind,
+                rdbs_core::DatabaseKind::SqlServer | rdbs_core::DatabaseKind::PostgreSql
+            ) =>
+        {
+            UiAction::LoadDatabase {
+                profile_id: path.profile_id,
+                database,
+            }
+        }
+        _ => UiAction::Refresh(path.profile_id),
     }
 }
 
@@ -886,6 +990,12 @@ fn object_icon_dark(obj: &DbObject) -> (&'static str, Color32) {
         ObjectKind::Folder if obj.name == rdbs_core::agent::AGENT_FOLDER => {
             (icon::GEAR, Color32::from_rgb(0x7F, 0xA2, 0xC4))
         }
+        ObjectKind::Folder if obj.name == rdbs_core::schema::PROGRAMMABILITY_FOLDER => {
+            (icon::CODE, Color32::from_rgb(0xF2, 0xA1, 0x5A))
+        }
+        ObjectKind::Folder if obj.name == rdbs_core::schema::SECURITY_FOLDER => {
+            (icon::SHIELD_CHECK, Color32::from_rgb(0x7F, 0xA2, 0xC4))
+        }
         ObjectKind::Folder => (icon::FOLDER_SIMPLE, Color32::from_rgb(0x9A, 0xA3, 0xB2)),
         ObjectKind::AgentJob
             if obj
@@ -897,6 +1007,7 @@ fn object_icon_dark(obj: &DbObject) -> (&'static str, Color32) {
         }
         ObjectKind::AgentJob => (icon::CLOCK, Color32::from_rgb(0xE0, 0x8A, 0x1E)),
         ObjectKind::Notice => (icon::INFO, color::text_dim()),
+        ObjectKind::CatalogEntry => (icon::DOT_OUTLINE, color::text_dim()),
         ObjectKind::Table => (icon::TABLE, Color32::from_rgb(0x5E, 0xA2, 0xFF)),
         ObjectKind::View => (icon::EYE, Color32::from_rgb(0x4F, 0xC1, 0xB0)),
         ObjectKind::MaterializedView => (icon::STACK, Color32::from_rgb(0x4F, 0xC1, 0xB0)),
@@ -1029,5 +1140,41 @@ impl TreeRow {
         );
         content(ui, content_rect);
         (response, toggled)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rdbs_core::DatabaseKind;
+
+    fn path(kind: DatabaseKind, database: Option<&str>) -> PathCtx {
+        PathCtx {
+            profile_id: ProfileId::new(),
+            kind,
+            database: database.map(str::to_owned),
+            schema: None,
+        }
+    }
+
+    #[test]
+    fn refresh_reloads_the_database_of_the_node() {
+        let folder = DbObject::new("Tables", ObjectKind::Folder);
+        let ms = path(DatabaseKind::SqlServer, Some("shop"));
+        assert!(matches!(
+            refresh_action(&ms, &folder),
+            UiAction::LoadDatabase { database, .. } if database == "shop"
+        ));
+        let db = DbObject::new("hr", ObjectKind::Database);
+        assert!(matches!(
+            refresh_action(&path(DatabaseKind::PostgreSql, None), &db),
+            UiAction::LoadDatabase { database, .. } if database == "hr"
+        ));
+        // Engines without lazily loaded databases refresh the whole connection.
+        let lite = path(DatabaseKind::Sqlite, None);
+        assert!(matches!(
+            refresh_action(&lite, &folder),
+            UiAction::Refresh(id) if id == lite.profile_id
+        ));
     }
 }

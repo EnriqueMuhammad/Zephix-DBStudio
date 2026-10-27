@@ -460,7 +460,7 @@ SELECT
             + N' ' + STUFF(STUFF(RIGHT(N'000000' + CONVERT(varchar(6), h.run_time), 6), 3, 0, N':'), 6, 0, N':')
     END AS run_time,
     STUFF(STUFF(RIGHT(N'000000' + CONVERT(varchar(6), h.run_duration), 6), 3, 0, N':'), 6, 0, N':') AS duration,
-    h.retries,
+    h.retries_attempted AS retries,
     h.sql_severity,
     h.sql_message_id,
     h.message

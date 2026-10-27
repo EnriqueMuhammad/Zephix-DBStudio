@@ -42,6 +42,10 @@ const SC_NEW_QUERY: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND,
 const SC_CLOSE_TAB: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::W);
 const SC_CLOSE_ALL_TABS: KeyboardShortcut =
     KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::W);
+const SC_OPEN_QUERY: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::O);
+const SC_SAVE_QUERY: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::S);
+const SC_SAVE_QUERY_AS: KeyboardShortcut =
+    KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::S);
 const SC_SIDEBAR: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::B);
 const SC_FILTER: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::F);
 const SC_RUN: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Enter);
@@ -154,7 +158,7 @@ fn history_entry(
 
 /// The Zephix application.
 pub struct StudioApp {
-    /// Keeps the window on its monitor.
+    /// Opens the window at a usable size and remembers it.
     window_fit: crate::window::WindowFit,
     services: ServiceHandle,
     store: ProfileStore,
@@ -174,6 +178,8 @@ pub struct StudioApp {
     /// Results of background "Save as…" exports.
     export_tx: std::sync::mpsc::Sender<StatusMessage>,
     export_rx: std::sync::mpsc::Receiver<StatusMessage>,
+    /// Script file dialogs, the last folder and tabs waiting for a save decision.
+    scripts: crate::scripts::Scripts,
     egui_ctx: egui::Context,
     /// Cached history rows for the history tab, and the filter they match.
     history: Vec<rdbs_storage::HistoryEntry>,
@@ -268,8 +274,12 @@ impl StudioApp {
             .storage
             .and_then(|s| eframe::get_value(s, key))
             .unwrap_or_default();
+        workspace.dock_floating_tabs();
         // Every start opens on the home page; the other restored tabs stay behind it.
         workspace.show_welcome();
+        let script_dir: Option<std::path::PathBuf> = cc
+            .storage
+            .and_then(|s| eframe::get_value(s, crate::scripts::SCRIPT_DIR_KEY));
 
         Ok(Self {
             window_fit: crate::window::WindowFit::default(),
@@ -289,6 +299,7 @@ impl StudioApp {
             demo,
             export_tx,
             export_rx,
+            scripts: crate::scripts::Scripts::new(script_dir),
             egui_ctx: cc.egui_ctx.clone(),
             history: Vec::new(),
             history_filter: String::new(),
@@ -774,12 +785,18 @@ impl StudioApp {
             || self.show_about
             || self.prompt.is_some()
             || self.exec.is_some()
+            || !self.scripts.close_queue.is_empty()
+            || self.scripts.quit_prompt
         {
             return; // Modals own the keyboard.
         }
         let pressed = |sc: &KeyboardShortcut| ctx.input_mut(|i| i.consume_shortcut(sc));
         let new_connection = pressed(&SC_NEW_CONNECTION);
         let new_query = pressed(&SC_NEW_QUERY);
+        let open_query = pressed(&SC_OPEN_QUERY);
+        // Before Ctrl+S, which would also match Ctrl+Shift+S.
+        let save_query_as = pressed(&SC_SAVE_QUERY_AS);
+        let save_query = pressed(&SC_SAVE_QUERY);
         // Before Ctrl+W, which would also match Ctrl+Shift+W.
         let close_all_tabs = pressed(&SC_CLOSE_ALL_TABS);
         let close_tab = pressed(&SC_CLOSE_TAB);
@@ -790,6 +807,15 @@ impl StudioApp {
 
         if new_connection {
             actions.push(UiAction::NewConnection);
+        }
+        if open_query {
+            actions.push(UiAction::OpenQueryFile);
+        }
+        if save_query || save_query_as {
+            actions.push(UiAction::SaveQuery {
+                tab_id: None,
+                save_as: save_query_as,
+            });
         }
         if new_query {
             actions.push(UiAction::NewQuery {
@@ -821,8 +847,213 @@ impl StudioApp {
     }
 
     fn close_active_tab(&mut self) {
-        let closed = self.workspace.close_active_tab();
+        if let Some(key) = self
+            .workspace
+            .dock
+            .find_active_focused()
+            .map(|(_, t)| t.key())
+        {
+            self.request_close(TabClose::One(key));
+        }
+    }
+
+    /// Closes the tabs `which` selects. Those with unsaved changes stay open and are queued;
+    /// the first one asks whether to save.
+    fn request_close(&mut self, which: TabClose) {
+        let dirty: Vec<u64> = self
+            .workspace
+            .dock
+            .iter_all_tabs()
+            .filter(|(_, t)| which.closes(t.key()) && tab_is_dirty(t))
+            .map(|(_, t)| t.key())
+            .collect();
+        let closed = self.workspace.close_where(which, |t| !tab_is_dirty(t));
         self.cancel_closed(closed);
+        for key in dirty {
+            if !self.scripts.close_queue.contains(&key) {
+                self.scripts.close_queue.push_back(key);
+            }
+        }
+        if let Some(&key) = self.scripts.close_queue.front() {
+            self.workspace.focus_tab(key);
+        }
+    }
+
+    /// Closes one tab without asking (its changes were saved or discarded).
+    fn close_now(&mut self, key: u64) {
+        let closed = self.workspace.close_tabs(TabClose::One(key));
+        self.cancel_closed(closed);
+        self.scripts.close_queue.retain(|k| *k != key);
+        if let Some(&next) = self.scripts.close_queue.front() {
+            self.workspace.focus_tab(next);
+        }
+    }
+
+    /// Saves a query tab to its file, or asks for one (`save_as`, or a tab without a file).
+    /// `then_close` closes it afterwards, as part of closing tabs.
+    fn save_query(&mut self, tab_id: u64, save_as: bool, then_close: bool) {
+        let Some(q) = self.workspace.query_tab_mut(tab_id) else {
+            return;
+        };
+        if q.data_view.is_some() {
+            return;
+        }
+        match q.path.clone().filter(|_| !save_as) {
+            Some(path) => self.write_query(tab_id, path, then_close),
+            None => {
+                let (path, title) = (q.path.clone(), q.title.clone());
+                let ctx = self.egui_ctx.clone();
+                if let Err(e) =
+                    self.scripts
+                        .pick_save(&ctx, tab_id, path.as_deref(), &title, then_close)
+                {
+                    self.status = Some(StatusMessage::error(e));
+                    self.scripts.abort();
+                }
+            }
+        }
+    }
+
+    fn write_query(&mut self, tab_id: u64, path: std::path::PathBuf, then_close: bool) {
+        let Some(q) = self.workspace.query_tab_mut(tab_id) else {
+            return;
+        };
+        match crate::scripts::write_script(&path, &q.sql) {
+            Ok(()) => {
+                self.scripts.last_dir = path.parent().map(std::path::Path::to_path_buf);
+                self.status = Some(StatusMessage::info(format!("Saved {}", path.display())));
+                q.mark_saved(path);
+                if then_close {
+                    self.close_now(tab_id);
+                }
+            }
+            Err(e) => {
+                self.status = Some(StatusMessage::error(format!(
+                    "Could not save {}: {e}",
+                    path.display()
+                )));
+                self.scripts.abort();
+            }
+        }
+    }
+
+    /// Applies the result of a script file dialog.
+    fn apply_picked(&mut self, picked: crate::scripts::Picked) {
+        use crate::scripts::Picked;
+        match picked {
+            Picked::Open { path, text } => {
+                self.scripts.last_dir = path.parent().map(std::path::Path::to_path_buf);
+                if let Some(id) = self.workspace.tab_for_path(&path) {
+                    self.workspace.focus_tab(id);
+                    return;
+                }
+                let title = path.file_name().map(|n| n.to_string_lossy().into_owned());
+                let id = self
+                    .workspace
+                    .open_query_tab(self.explorer.selected_profile, text, title);
+                if let Some(q) = self.workspace.query_tab_mut(id) {
+                    q.mark_saved(path);
+                }
+            }
+            Picked::SaveTo {
+                tab_id,
+                path,
+                then_close,
+            } => self.write_query(tab_id, path, then_close),
+            Picked::Cancelled { then_close } => {
+                if then_close {
+                    self.scripts.abort();
+                }
+            }
+            Picked::Failed(message) => self.status = Some(StatusMessage::error(message)),
+        }
+    }
+
+    /// Holds back closing Zephix while scripts have unsaved changes, and asks what to do.
+    fn guard_quit(&mut self, ctx: &egui::Context) {
+        if !ctx.input(|i| i.viewport().close_requested()) || self.scripts.allow_quit {
+            return;
+        }
+        if self.workspace.unsaved_tabs().is_empty() {
+            return;
+        }
+        ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+        if !self.scripts.quitting {
+            self.scripts.quit_prompt = true;
+        }
+    }
+
+    /// The quit prompt, and the "Save All" run that ends in closing Zephix.
+    fn show_quit_prompt(&mut self, ctx: &egui::Context) {
+        use crate::scripts::QuitChoice;
+        if self.scripts.quit_prompt {
+            let titles: Vec<String> = self
+                .workspace
+                .unsaved_tabs()
+                .into_iter()
+                .map(|(_, title)| title)
+                .collect();
+            match crate::scripts::quit_prompt(ctx, &titles) {
+                Some(QuitChoice::SaveAll) => {
+                    self.scripts.quit_prompt = false;
+                    self.scripts.quitting = true;
+                    self.scripts.close_queue = self
+                        .workspace
+                        .unsaved_tabs()
+                        .into_iter()
+                        .map(|(id, _)| id)
+                        .collect();
+                }
+                Some(QuitChoice::Discard) => {
+                    self.scripts.quit_prompt = false;
+                    let dropped = self.workspace.close_where(TabClose::All, tab_is_dirty);
+                    self.cancel_closed(dropped);
+                    self.quit(ctx);
+                }
+                Some(QuitChoice::Cancel) => self.scripts.quit_prompt = false,
+                None => {}
+            }
+            return;
+        }
+        if !self.scripts.quitting || self.scripts.dialog_open {
+            return;
+        }
+        match self.scripts.close_queue.front().copied() {
+            Some(key) if self.workspace.query_tab_mut(key).is_none() => {
+                self.scripts.close_queue.pop_front();
+            }
+            // Saved tabs leave the queue; a file dialog or an error stops here.
+            Some(key) => self.save_query(key, false, true),
+            None => self.quit(ctx),
+        }
+    }
+
+    fn quit(&mut self, ctx: &egui::Context) {
+        self.scripts.quitting = false;
+        self.scripts.allow_quit = true;
+        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+    }
+
+    /// Asks about the first queued tab with unsaved changes.
+    fn show_close_prompt(&mut self, ctx: &egui::Context) {
+        use crate::scripts::CloseChoice;
+        if self.scripts.dialog_open || self.scripts.quitting || self.scripts.quit_prompt {
+            return;
+        }
+        let Some(&key) = self.scripts.close_queue.front() else {
+            return;
+        };
+        let Some(q) = self.workspace.query_tab_mut(key) else {
+            self.scripts.close_queue.pop_front();
+            return;
+        };
+        let (title, path) = (q.title.clone(), q.path.clone());
+        match crate::scripts::close_prompt(ctx, &title, path.as_deref()) {
+            Some(CloseChoice::Save) => self.save_query(key, false, true),
+            Some(CloseChoice::Discard) => self.close_now(key),
+            Some(CloseChoice::Cancel) => self.scripts.abort(),
+            None => {}
+        }
     }
 
     /// Cancels the queries still running in closed tabs.
@@ -1120,9 +1351,18 @@ impl StudioApp {
                 UiAction::ToggleSidebar => {
                     self.workspace.sidebar_visible = !self.workspace.sidebar_visible;
                 }
-                UiAction::CloseTabs(which) => {
-                    let closed = self.workspace.close_tabs(which);
-                    self.cancel_closed(closed);
+                UiAction::CloseTabs(which) => self.request_close(which),
+                UiAction::OpenQueryFile => {
+                    let ctx = self.egui_ctx.clone();
+                    if let Err(e) = self.scripts.pick_open(&ctx) {
+                        self.status = Some(StatusMessage::error(e));
+                    }
+                }
+                UiAction::SaveQuery { tab_id, save_as } => {
+                    let tab_id = tab_id.or_else(|| self.workspace.active_query_tab().map(|q| q.id));
+                    if let Some(id) = tab_id {
+                        self.save_query(id, save_as, false);
+                    }
                 }
             }
         }
@@ -1685,6 +1925,46 @@ impl StudioApp {
                         run: false,
                     });
                 }
+                if ui
+                    .add(item(
+                        format!("{}  Open Query…", icon::FOLDER_OPEN),
+                        &SC_OPEN_QUERY,
+                    ))
+                    .clicked()
+                {
+                    actions.push(UiAction::OpenQueryFile);
+                }
+                let has_script = self
+                    .workspace
+                    .active_query_tab()
+                    .is_some_and(|q| q.data_view.is_none());
+                if ui
+                    .add_enabled(
+                        has_script,
+                        item(format!("{}  Save Query", icon::FLOPPY_DISK), &SC_SAVE_QUERY),
+                    )
+                    .clicked()
+                {
+                    actions.push(UiAction::SaveQuery {
+                        tab_id: None,
+                        save_as: false,
+                    });
+                }
+                if ui
+                    .add_enabled(
+                        has_script,
+                        item(
+                            format!("{}  Save Query As…", icon::FLOPPY_DISK_BACK),
+                            &SC_SAVE_QUERY_AS,
+                        ),
+                    )
+                    .clicked()
+                {
+                    actions.push(UiAction::SaveQuery {
+                        tab_id: None,
+                        save_as: true,
+                    });
+                }
                 ui.separator();
                 if ui
                     .add(item(format!("{}  Close Tab", icon::X), &SC_CLOSE_TAB))
@@ -1936,6 +2216,27 @@ impl StudioApp {
                     sql: None,
                     title: None,
                     run: false,
+                });
+            }
+            if ui
+                .add(ToolbarButton::new(icon::FOLDER_OPEN, "Open"))
+                .on_hover_text("Open a .sql file (Ctrl+O)")
+                .clicked()
+            {
+                actions.push(UiAction::OpenQueryFile);
+            }
+            let has_script = self
+                .workspace
+                .active_query_tab()
+                .is_some_and(|q| q.data_view.is_none());
+            if ui
+                .add(ToolbarButton::new(icon::FLOPPY_DISK, "Save").enabled(has_script))
+                .on_hover_text("Save the query to a file (Ctrl+S)")
+                .clicked()
+            {
+                actions.push(UiAction::SaveQuery {
+                    tab_id: None,
+                    save_as: false,
                 });
             }
             ui.separator();
@@ -2508,6 +2809,49 @@ impl StudioApp {
     }
 }
 
+/// The workspace with every tab closed: a page in the editor colour with New Query and the
+/// home page. Returns whether the home page was asked for.
+fn empty_workspace(ui: &mut Ui, actions: &mut Vec<UiAction>) -> bool {
+    let rect = ui.max_rect();
+    ui.painter().rect_filled(rect, 0, color::editor());
+    let mut welcome = false;
+    ui.vertical_centered(|ui| {
+        ui.add_space((rect.height() * 0.32).max(12.0));
+        ui.label(
+            RichText::new(icon::FOLDER_OPEN)
+                .size(34.0)
+                .color(color::text_faint()),
+        );
+        ui.label(RichText::new("No open tabs").color(color::text_dim()));
+        ui.add_space(8.0);
+        let buttons = ui
+            .horizontal(|ui| {
+                let new_query = ui
+                    .button(format!("{}  New Query", icon::FILE_SQL))
+                    .on_hover_text("Ctrl+T")
+                    .clicked();
+                let home = ui.button(format!("{}  Welcome", icon::HOUSE)).clicked();
+                (new_query, home)
+            })
+            .inner;
+        if buttons.0 {
+            actions.push(UiAction::NewQuery {
+                profile_id: None,
+                sql: None,
+                title: None,
+                run: false,
+            });
+        }
+        welcome = buttons.1;
+    });
+    welcome
+}
+
+/// A query tab whose script has unsaved changes.
+fn tab_is_dirty(tab: &Tab) -> bool {
+    matches!(tab, Tab::Query(q) if q.is_dirty())
+}
+
 fn dock_style(style: &mut egui_dock::Style) {
     style.main_surface_border_stroke = Stroke::NONE;
     style.tab_bar.bg_fill = color::panel();
@@ -2529,6 +2873,11 @@ fn dock_style(style: &mut egui_dock::Style) {
     style.tab.tab_body.inner_margin = Margin::ZERO;
     style.tab.tab_body.stroke = Stroke::new(1.0, color::border());
     style.tab.hline_below_active_tab_name = true;
+    // egui_dock fills the hovered close button edge to edge, over the tab's right border;
+    // the cross turns red instead.
+    style.buttons.close_tab_bg_fill = Color32::TRANSPARENT;
+    style.buttons.close_tab_color = color::text_dim();
+    style.buttons.close_tab_active_color = color::danger();
     style.tab_bar.show_scroll_bar_on_overflow = true;
 
     style.separator.color_idle = color::border();
@@ -2546,6 +2895,10 @@ impl eframe::App for StudioApp {
         while let Ok(message) = self.export_rx.try_recv() {
             self.status = Some(message);
         }
+        while let Some(picked) = self.scripts.poll() {
+            self.apply_picked(picked);
+        }
+        self.guard_quit(&ctx);
 
         let mut actions = Vec::new();
         self.shortcuts(&ctx, &mut actions);
@@ -2582,7 +2935,14 @@ impl eframe::App for StudioApp {
                 });
         }
 
+        let mut open_welcome = false;
         CentralPanel::no_frame().show(ui, |ui| {
+            // With every tab closed the dock paints nothing, which leaves the bare (black)
+            // window background; show an empty page with a way back instead.
+            if self.workspace.dock.iter_all_tabs().next().is_none() {
+                open_welcome = empty_workspace(ui, &mut actions);
+                return;
+            }
             let mut style = egui_dock::Style::from_egui(ui.style());
             dock_style(&mut style);
             let button_font = egui::TextStyle::Button.resolve(ui.style());
@@ -2614,11 +2974,16 @@ impl eframe::App for StudioApp {
                 .tab_context_menus(false)
                 .show_inside(ui, &mut cx);
         });
+        if open_welcome {
+            self.workspace.show_welcome();
+        }
 
         self.show_dialog(&ctx);
         self.show_password_prompt(&ctx);
         self.show_exec_dialog(&ctx);
         self.show_confirmation(&ctx);
+        self.show_close_prompt(&ctx);
+        self.show_quit_prompt(&ctx);
         self.about_modal(&ctx);
         self.apply(actions);
     }
@@ -2631,5 +2996,11 @@ impl eframe::App for StudioApp {
         };
         eframe::set_value(storage, key, &self.workspace);
         eframe::set_value(storage, LIGHT_THEME_KEY, &theme::is_light());
+        if let Some(dir) = &self.scripts.last_dir {
+            eframe::set_value(storage, crate::scripts::SCRIPT_DIR_KEY, dir);
+        }
+        if let Some(state) = self.window_fit.state() {
+            eframe::set_value(storage, crate::window::EFRAME_WINDOW_KEY, &state);
+        }
     }
 }
