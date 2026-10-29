@@ -103,6 +103,8 @@ async fn scripts_return_last_result_and_counts() {
     assert_eq!(rs.rows.len(), 3);
     assert_eq!(rs.columns[0].type_name, "int4");
     assert_eq!(out.rows_affected, Some(3));
+    // CREATE reports no count; INSERT and SELECT each get a line.
+    assert_eq!(out.messages, vec!["(3 rows affected)", "(3 rows affected)"]);
 
     let out = s
         .execute(
@@ -113,6 +115,15 @@ async fn scripts_return_last_result_and_counts() {
         .expect("update");
     assert_eq!(out.rows_affected, Some(2));
     assert!(out.results.is_empty());
+
+    let out = s
+        .execute(
+            "BEGIN TRANSACTION;\n--Query\nDELETE FROM it_t WHERE id = 1;\n--COMMIT;\nROLLBACK;",
+            CancelHandle::new(),
+        )
+        .await
+        .expect("transaction template");
+    assert_eq!(out.messages, vec!["(1 row affected)"]);
 }
 
 #[tokio::test]
@@ -338,6 +349,30 @@ async fn apply_changes_is_transactional() {
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[0][1], CellValue::Text("z".into()));
     assert_eq!(rows[1][1], CellValue::Text("c".into()));
+}
+
+#[path = "../../rdbs-core/testkit/edit_without_key.rs"]
+mod without_key;
+
+#[tokio::test]
+async fn edits_table_without_primary_key() {
+    let Some(mut s) = session().await else { return };
+    s.execute(
+        "DROP TABLE IF EXISTS it_nokey; \
+         CREATE TABLE it_nokey (code varchar(20), starts timestamp(3), note text); \
+         INSERT INTO it_nokey VALUES ('a', '2026-10-29 07:00:00.123', NULL), \
+             ('a', '2026-10-29 07:00:00.123', NULL), ('b', '2026-10-29 15:00:00', 'x')",
+        CancelHandle::new(),
+    )
+    .await
+    .expect("setup");
+    without_key::edit_without_key(
+        s.as_mut(),
+        DatabaseKind::PostgreSql,
+        Some("public"),
+        "it_nokey",
+    )
+    .await;
 }
 
 #[path = "../../rdbs-core/testkit/schema_roundtrip.rs"]

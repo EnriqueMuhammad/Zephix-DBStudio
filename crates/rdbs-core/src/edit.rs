@@ -1,10 +1,15 @@
 //! Editing table data from the result grid.
 //!
-//! The UI collects [`PendingEdits`] against a result set that came from a single table with a
-//! primary key ([`TableTarget`]). [`build_changes`] turns them into parameter-free DML
-//! statements, each expected to touch exactly one row, which adapters apply in one transaction
-//! (see `DatabaseAdapter::apply_changes`). A statement that touches no row means the row was
-//! changed or deleted concurrently, and the whole transaction is rolled back.
+//! The UI collects [`PendingEdits`] against a result set that came from a single table
+//! ([`TableTarget`]). [`build_changes`] turns them into parameter-free DML statements, each
+//! expected to touch exactly one row, which adapters apply in one transaction (see
+//! `DatabaseAdapter::apply_changes`). A statement that touches no row means the row was changed
+//! or deleted concurrently, and the whole transaction is rolled back.
+//!
+//! Rows are found by their primary key. A table without one is matched by the values of all
+//! its comparable columns ([`RowMatch::AllColumns`]); when the grid shows identical rows, an
+//! `UPDATE` / `DELETE` changes only one of them (`TOP (1)`, `LIMIT 1`, `ROWNUM = 1`, or by
+//! `ctid` / `rowid`), since such rows cannot be told apart anyway.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -24,8 +29,12 @@ pub struct TableTarget {
     pub schema: Option<String>,
     /// Table name.
     pub table: String,
-    /// Primary key columns. Editing is only offered when this is not empty.
+    /// Primary key columns; rows are found by these when there are any.
     pub primary_key: Vec<String>,
+    /// All columns of the table in ordinal order (empty when unknown). Rows of a table without
+    /// a primary key are found by the values of these.
+    #[serde(default)]
+    pub columns: Vec<String>,
 }
 
 impl TableTarget {
@@ -153,15 +162,33 @@ impl Change {
     }
 }
 
+/// How rows of a result are identified in `UPDATE` / `DELETE` statements.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RowMatch {
+    /// By the primary key.
+    PrimaryKey,
+    /// By the values of all comparable columns (the table has no primary key).
+    AllColumns,
+}
+
 /// Why edits cannot be turned into statements.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum EditError {
-    /// The table has no primary key.
+    /// The table has no primary key and its columns are not known.
     #[error("the table has no primary key, so rows cannot be identified safely")]
     NoPrimaryKey,
     /// A primary key column is not part of the result.
     #[error("primary key column {0} is not in the result; include it in the SELECT to edit")]
     MissingKeyColumn(String),
+    /// A column of a table without a primary key is not part of the result.
+    #[error(
+        "column {0} is not in the result; a table without a primary key is edited with all its \
+         columns selected"
+    )]
+    MissingColumn(String),
+    /// No column of a table without a primary key can be compared in a `WHERE` clause.
+    #[error("the table has no primary key and none of its columns can be compared")]
+    NoComparableColumn,
     /// A primary key value of a row is NULL or binary.
     #[error("row {0} has an unusable primary key value")]
     UnusableKey(usize),
@@ -188,15 +215,51 @@ fn edit_literal(kind: DatabaseKind, value: &EditValue, hint: Option<&CellValue>)
     }
 }
 
-/// Builds the statements for `edits` against rows of `rs` read from `target`.
-pub fn build_changes(
-    target: &TableTarget,
-    rs: &ResultSet,
-    edits: &PendingEdits,
-) -> Result<Vec<Change>, EditError> {
-    if target.primary_key.is_empty() {
-        return Err(EditError::NoPrimaryKey);
-    }
+/// Columns that identify a row, by result column index.
+struct RowKey {
+    mode: RowMatch,
+    columns: Vec<usize>,
+    /// Whether the key covers every column, so rows equal on it are indistinguishable.
+    complete: bool,
+}
+
+/// Base type name in lower case: `nvarchar(50)` → `nvarchar`.
+fn base_type(type_name: &str) -> String {
+    type_name
+        .split('(')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase()
+}
+
+/// Whether `=` works on a column of this type (large objects, XML, JSON and spatial types
+/// cannot be compared, or not reliably).
+fn comparable_type(kind: DatabaseKind, type_name: &str) -> bool {
+    let excluded: &[&str] = match kind {
+        DatabaseKind::SqlServer => &[
+            "text",
+            "ntext",
+            "image",
+            "xml",
+            "udt",
+            "sql_variant",
+            "geography",
+            "geometry",
+        ],
+        DatabaseKind::PostgreSql => &[
+            "json", "xml", "point", "line", "lseg", "box", "path", "polygon", "circle",
+        ],
+        DatabaseKind::MySql | DatabaseKind::MariaDb => &["json", "geometry"],
+        DatabaseKind::Oracle => &[
+            "clob", "nclob", "blob", "bfile", "long", "long raw", "xmltype",
+        ],
+        DatabaseKind::Sqlite | DatabaseKind::MongoDb | DatabaseKind::Redis => &[],
+    };
+    !excluded.contains(&base_type(type_name).as_str())
+}
+
+fn row_key(target: &TableTarget, rs: &ResultSet) -> Result<RowKey, EditError> {
     let column_index = |name: &str| {
         rs.columns.iter().position(|c| c.name == name).or_else(|| {
             rs.columns
@@ -204,41 +267,172 @@ pub fn build_changes(
                 .position(|c| c.name.eq_ignore_ascii_case(name))
         })
     };
-    let keys: Vec<(String, usize)> = target
-        .primary_key
-        .iter()
-        .map(|k| {
-            column_index(k)
-                .map(|i| (k.clone(), i))
-                .ok_or_else(|| EditError::MissingKeyColumn(k.clone()))
-        })
-        .collect::<Result<_, _>>()?;
+    if !target.primary_key.is_empty() {
+        let columns = target
+            .primary_key
+            .iter()
+            .map(|k| column_index(k).ok_or_else(|| EditError::MissingKeyColumn(k.clone())))
+            .collect::<Result<_, _>>()?;
+        return Ok(RowKey {
+            mode: RowMatch::PrimaryKey,
+            columns,
+            complete: true,
+        });
+    }
+    if target.columns.is_empty() {
+        return Err(EditError::NoPrimaryKey);
+    }
+    let mut columns = Vec::new();
+    let mut complete = true;
+    for name in &target.columns {
+        let i = column_index(name).ok_or_else(|| EditError::MissingColumn(name.clone()))?;
+        let binary = rs
+            .rows
+            .iter()
+            .any(|r| matches!(r.get(i), Some(CellValue::Bytes(_))));
+        if !binary && comparable_type(target.kind, &rs.columns[i].type_name) {
+            columns.push(i);
+        } else {
+            complete = false;
+        }
+    }
+    if columns.is_empty() {
+        return Err(EditError::NoComparableColumn);
+    }
+    Ok(RowKey {
+        mode: RowMatch::AllColumns,
+        columns,
+        complete,
+    })
+}
+
+/// How rows of `rs` (read from `target`) are identified, or why they cannot be edited.
+pub fn row_match(target: &TableTarget, rs: &ResultSet) -> Result<RowMatch, EditError> {
+    row_key(target, rs).map(|k| k.mode)
+}
+
+/// SQL Server literal for a date/time read back from the server, for comparisons. `datetime`
+/// stores 1/300 s ticks that are read back with more digits than its literals accept, so they
+/// are rounded to milliseconds; other types keep at most the 7 digits they store. `datetime`
+/// and `smalldatetime` use the ISO 8601 `T` form, which does not depend on `DATEFORMAT`.
+fn mssql_temporal(text: &str, type_name: &str) -> String {
+    let legacy = matches!(base_type(type_name).as_str(), "datetime" | "smalldatetime");
+    let mut out = text.to_owned();
+    if let Some(dot) = text.find('.') {
+        let after = &text[dot + 1..];
+        let len = after
+            .find(|c: char| !c.is_ascii_digit())
+            .unwrap_or(after.len());
+        let (digits, rest) = after.split_at(len);
+        let digits = if legacy && !digits.is_empty() {
+            let nanos: u64 = format!("{digits:0<9}")[..9].parse().unwrap_or(0);
+            format!("{:03}", ((nanos + 500_000) / 1_000_000).min(999))
+        } else {
+            digits.trim_end_matches('0').to_owned()
+        };
+        out = text[..dot].to_owned();
+        if !digits.is_empty() {
+            out.push('.');
+            out.push_str(&digits);
+        }
+        out.push_str(rest);
+    }
+    if legacy && out.as_bytes().get(10) == Some(&b' ') {
+        out.replace_range(10..11, "T");
+    }
+    sql_string(&out, DatabaseKind::SqlServer)
+}
+
+/// Literal of a value read from the server, for a `WHERE` comparison with its column.
+fn key_literal(kind: DatabaseKind, type_name: &str, value: &CellValue) -> String {
+    match value {
+        CellValue::Temporal(t) if kind == DatabaseKind::SqlServer => mssql_temporal(t, type_name),
+        other => sql_literal(other, kind),
+    }
+}
+
+/// Builds the statements for `edits` against rows of `rs` read from `target`.
+pub fn build_changes(
+    target: &TableTarget,
+    rs: &ResultSet,
+    edits: &PendingEdits,
+) -> Result<Vec<Change>, EditError> {
+    let key = row_key(target, rs)?;
     let kind = target.kind;
     let table = target.qualified();
     let col = |i: usize| quote_identifier(kind, &rs.columns[i].name);
 
     let where_clause = |row: usize| -> Result<String, EditError> {
         let cells = rs.rows.get(row).ok_or(EditError::UnusableKey(row))?;
-        let parts = keys
+        let parts = key
+            .columns
             .iter()
-            .map(|(name, i)| match cells.get(*i) {
-                Some(CellValue::Null | CellValue::Bytes(_)) | None => {
+            .map(|&i| match (cells.get(i), key.mode) {
+                (None, _) | (Some(CellValue::Null | CellValue::Bytes(_)), RowMatch::PrimaryKey) => {
                     Err(EditError::UnusableKey(row))
                 }
-                Some(v) => Ok(format!(
+                (Some(CellValue::Null), _) => Ok(format!("{} IS NULL", col(i))),
+                (Some(v), _) => Ok(format!(
                     "{} = {}",
-                    quote_identifier(kind, name),
-                    sql_literal(v, kind)
+                    col(i),
+                    key_literal(kind, &rs.columns[i].type_name, v)
                 )),
             })
             .collect::<Result<Vec<_>, _>>()?;
         Ok(parts.join(" AND "))
     };
+    // Rows identical on every column cannot be told apart: change just one of them.
+    let one_of_several = |row: usize| {
+        key.mode == RowMatch::AllColumns
+            && key.complete
+            && rs.rows.get(row).is_some_and(|cells| {
+                rs.rows.iter().enumerate().any(|(j, other)| {
+                    j != row && key.columns.iter().all(|&i| other.get(i) == cells.get(i))
+                })
+            })
+    };
+    // `UPDATE` (with `set` = ` SET …`) or `DELETE` (with an empty `set`) of one row.
+    let statement = |set: &str, row: usize| -> Result<String, EditError> {
+        let filter = where_clause(row)?;
+        let verb = if set.is_empty() {
+            "DELETE FROM"
+        } else {
+            "UPDATE"
+        };
+        if !one_of_several(row) {
+            return Ok(format!("{verb} {table}{set} WHERE {filter}"));
+        }
+        Ok(match kind {
+            DatabaseKind::SqlServer => {
+                let verb = if set.is_empty() {
+                    "DELETE TOP (1) FROM"
+                } else {
+                    "UPDATE TOP (1)"
+                };
+                format!("{verb} {table}{set} WHERE {filter}")
+            }
+            DatabaseKind::MySql | DatabaseKind::MariaDb => {
+                format!("{verb} {table}{set} WHERE {filter} LIMIT 1")
+            }
+            DatabaseKind::Oracle => format!("{verb} {table}{set} WHERE {filter} AND ROWNUM = 1"),
+            DatabaseKind::PostgreSql => format!(
+                "{verb} {table}{set} WHERE {filter} AND ctid = \
+                 (SELECT ctid FROM {table} WHERE {filter} LIMIT 1)"
+            ),
+            DatabaseKind::Sqlite => format!(
+                "{verb} {table}{set} WHERE {filter} AND rowid = \
+                 (SELECT rowid FROM {table} WHERE {filter} LIMIT 1)"
+            ),
+            DatabaseKind::MongoDb | DatabaseKind::Redis => {
+                format!("{verb} {table}{set} WHERE {filter}")
+            }
+        })
+    };
 
     let mut changes = Vec::new();
     for &row in &edits.deleted {
         changes.push(Change {
-            sql: format!("DELETE FROM {table} WHERE {}", where_clause(row)?),
+            sql: statement("", row)?,
             expected_rows: 1,
         });
     }
@@ -255,11 +449,7 @@ pub fn build_changes(
             })
             .collect();
         changes.push(Change {
-            sql: format!(
-                "UPDATE {table} SET {} WHERE {}",
-                sets.join(", "),
-                where_clause(row)?
-            ),
+            sql: statement(&format!(" SET {}", sets.join(", ")), row)?,
             expected_rows: 1,
         });
     }
@@ -342,7 +532,152 @@ mod tests {
             schema: Some("public".into()),
             table: "people".into(),
             primary_key: vec!["id".into()],
+            columns: vec![
+                "id".into(),
+                "name".into(),
+                "active".into(),
+                "balance".into(),
+            ],
         }
+    }
+
+    /// A table without a primary key, like a shift schedule: rows 0 and 2 are identical.
+    fn schedule() -> (TableTarget, ResultSet) {
+        let target = TableTarget {
+            kind: DatabaseKind::SqlServer,
+            database: None,
+            schema: Some("dbo".into()),
+            table: "schedule".into(),
+            primary_key: Vec::new(),
+            columns: vec!["code".into(), "starts".into(), "note".into()],
+        };
+        let row = |code: &str, starts: &str, note: Option<&str>| {
+            vec![
+                CellValue::Text(code.into()),
+                CellValue::Temporal(starts.into()),
+                note.map_or(CellValue::Null, |n| CellValue::Text(n.into())),
+            ]
+        };
+        let rs = ResultSet {
+            columns: vec![
+                ColumnMeta::new("code", "varchar"),
+                ColumnMeta::new("starts", "datetime"),
+                ColumnMeta::new("note", "nvarchar"),
+            ],
+            rows: vec![
+                row("0700-1500", "1900-01-01 07:00:00", None),
+                row("test", "1900-01-01 15:00:00.996666666", Some("x")),
+                row("0700-1500", "1900-01-01 07:00:00", None),
+            ],
+        };
+        (target, rs)
+    }
+
+    #[test]
+    fn rows_without_primary_key_match_all_columns() {
+        let (target, data) = schedule();
+        assert_eq!(row_match(&target, &data), Ok(RowMatch::AllColumns));
+        let mut e = PendingEdits::default();
+        e.set_cell(1, 2, EditValue::Text("y".into()), &data.rows[1][2]);
+        let changes = build_changes(&target, &data, &e).unwrap();
+        assert_eq!(
+            changes[0].sql,
+            "UPDATE [dbo].[schedule] SET [note] = N'y' WHERE [code] = N'test' \
+             AND [starts] = N'1900-01-01T15:00:00.997' AND [note] = N'x'"
+        );
+        assert_eq!(changes[0].expected_rows, 1);
+    }
+
+    #[test]
+    fn identical_rows_change_one_of_them() {
+        let (mut target, data) = schedule();
+        let mut e = PendingEdits::default();
+        e.set_cell(0, 2, EditValue::Text("z".into()), &data.rows[0][2]);
+        e.toggle_delete(2);
+        let filter = "[code] = N'0700-1500' AND [starts] = N'1900-01-01T07:00:00' \
+                      AND [note] IS NULL";
+        let sql: Vec<String> = build_changes(&target, &data, &e)
+            .unwrap()
+            .into_iter()
+            .map(|c| c.sql)
+            .collect();
+        assert_eq!(
+            sql,
+            [
+                format!("DELETE TOP (1) FROM [dbo].[schedule] WHERE {filter}"),
+                format!("UPDATE TOP (1) [dbo].[schedule] SET [note] = N'z' WHERE {filter}"),
+            ]
+        );
+
+        let mut one = |kind| {
+            target.kind = kind;
+            let mut e = PendingEdits::default();
+            e.toggle_delete(0);
+            build_changes(&target, &data, &e).unwrap().remove(0).sql
+        };
+        assert!(one(DatabaseKind::MySql).ends_with(" LIMIT 1"));
+        assert!(one(DatabaseKind::Oracle).ends_with(" AND ROWNUM = 1"));
+        let pg = one(DatabaseKind::PostgreSql);
+        assert!(
+            pg.starts_with("DELETE FROM \"dbo\".\"schedule\" WHERE \"code\" = '0700-1500'")
+                && pg.ends_with(" AND \"note\" IS NULL LIMIT 1)")
+                && pg.contains(" AND ctid = (SELECT ctid FROM \"dbo\".\"schedule\" WHERE "),
+            "{pg}"
+        );
+        assert!(one(DatabaseKind::Sqlite).contains(" AND rowid = (SELECT rowid FROM "));
+    }
+
+    #[test]
+    fn incomparable_columns_are_left_out_without_limiting() {
+        let (target, mut data) = schedule();
+        data.columns[2].type_name = "xml".into();
+        let mut e = PendingEdits::default();
+        e.toggle_delete(0);
+        assert_eq!(
+            build_changes(&target, &data, &e).unwrap()[0].sql,
+            "DELETE FROM [dbo].[schedule] WHERE [code] = N'0700-1500' \
+             AND [starts] = N'1900-01-01T07:00:00'"
+        );
+
+        data.columns[0].type_name = "text".into();
+        data.columns[1].type_name = "image".into();
+        assert_eq!(
+            row_match(&target, &data),
+            Err(EditError::NoComparableColumn)
+        );
+    }
+
+    #[test]
+    fn tables_without_primary_key_need_all_columns() {
+        let (mut target, mut data) = schedule();
+        data.columns.truncate(2);
+        assert_eq!(
+            row_match(&target, &data),
+            Err(EditError::MissingColumn("note".into()))
+        );
+        target.columns.clear();
+        assert_eq!(row_match(&target, &data), Err(EditError::NoPrimaryKey));
+    }
+
+    #[test]
+    fn sql_server_temporal_literals_round_trip() {
+        assert_eq!(
+            mssql_temporal("2026-10-29 07:00:00.996666666", "datetime"),
+            "N'2026-10-29T07:00:00.997'"
+        );
+        assert_eq!(
+            mssql_temporal("2026-10-29 07:00:00", "smalldatetime"),
+            "N'2026-10-29T07:00:00'"
+        );
+        assert_eq!(
+            mssql_temporal("2026-10-29 07:00:00.123456700", "datetime2"),
+            "N'2026-10-29 07:00:00.1234567'"
+        );
+        assert_eq!(
+            mssql_temporal("2026-10-29 07:00:00.500 +07:00", "datetimeoffset"),
+            "N'2026-10-29 07:00:00.5 +07:00'"
+        );
+        assert_eq!(mssql_temporal("07:30:00", "time"), "N'07:30:00'");
     }
 
     #[test]
@@ -408,6 +743,7 @@ mod tests {
         let data = rs();
         let mut no_pk = target(DatabaseKind::PostgreSql);
         no_pk.primary_key.clear();
+        no_pk.columns.clear();
         let e = PendingEdits::default();
         assert_eq!(
             build_changes(&no_pk, &data, &e),

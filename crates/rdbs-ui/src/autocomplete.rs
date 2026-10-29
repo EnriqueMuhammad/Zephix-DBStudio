@@ -34,6 +34,18 @@ pub struct AutocompleteState {
 pub struct Accepted {
     replace: std::ops::Range<usize>,
     insert: String,
+    /// Byte offset in `insert` for the caret (templates); `None` is after the insertion.
+    caret: Option<usize>,
+}
+
+impl Accepted {
+    fn new(replace: std::ops::Range<usize>, item: Item) -> Self {
+        Self {
+            replace,
+            insert: item.insert,
+            caret: item.caret,
+        }
+    }
 }
 
 impl AutocompleteState {
@@ -79,10 +91,7 @@ impl AutocompleteState {
             let item = popup.completion.items.get(popup.selected)?.clone();
             let replace = popup.completion.replace.clone();
             self.popup = None;
-            return Some(Accepted {
-                replace,
-                insert: item.insert,
-            });
+            return Some(Accepted::new(replace, item));
         }
         None
     }
@@ -137,12 +146,14 @@ impl AutocompleteState {
             .constrain(true)
             .show(ui.ctx(), |ui| {
                 egui::Frame::popup(ui.style()).show(ui, |ui| {
-                    ui.set_min_width(300.0);
+                    let columns = Columns::measure(ui, &popup.completion.items);
+                    ui.set_width(columns.width());
                     egui::ScrollArea::vertical()
                         .max_height(240.0)
                         .show(ui, |ui| {
+                            ui.spacing_mut().item_spacing.y = 0.0;
                             for (i, item) in popup.completion.items.iter().enumerate() {
-                                let response = row(ui, item, i == popup.selected);
+                                let response = row(ui, &columns, item, i == popup.selected);
                                 if i == popup.selected && popup.scroll_to_selected {
                                     response.scroll_to_me(None);
                                 }
@@ -151,10 +162,16 @@ impl AutocompleteState {
                                 }
                             }
                         });
+                    ui.add_space(4.0);
+                    // Arrows from the icon font: the text fonts have no arrow glyphs.
                     ui.label(
-                        RichText::new("↑↓ select · Enter/Tab insert · Esc close")
-                            .size(10.5)
-                            .color(color::text_faint()),
+                        RichText::new(format!(
+                            "{}{} select · Enter/Tab insert · Esc close",
+                            icon::ARROW_UP,
+                            icon::ARROW_DOWN
+                        ))
+                        .size(10.5)
+                        .color(color::text_faint()),
                     );
                 });
             });
@@ -173,14 +190,67 @@ impl AutocompleteState {
         let item = popup.completion.items.get(index)?.clone();
         let replace = popup.completion.replace.clone();
         self.popup = None;
-        Some(Accepted {
-            replace,
-            insert: item.insert,
-        })
+        Some(Accepted::new(replace, item))
     }
 }
 
-fn row(ui: &mut Ui, item: &Item, selected: bool) -> egui::Response {
+const ROW_HEIGHT: f32 = 22.0;
+const PAD: f32 = 8.0;
+const ICON_WIDTH: f32 = 22.0;
+
+/// Widths of the popup's two columns: the name on the left, and where it comes from and what
+/// it is on the right, behind a vertical divider so the details line up.
+struct Columns {
+    label: f32,
+    detail: f32,
+}
+
+impl Columns {
+    fn measure(ui: &Ui, items: &[Item]) -> Self {
+        let font = egui::TextStyle::Body.resolve(ui.style());
+        let width = |text: String, size: f32| {
+            let font = egui::FontId::new(size, font.family.clone());
+            ui.fonts_mut(|f| f.layout_no_wrap(text, font, egui::Color32::WHITE).size().x)
+        };
+        let label = items
+            .iter()
+            .map(|i| width(i.label.clone(), font.size))
+            .fold(0.0, f32::max);
+        let detail = items
+            .iter()
+            .map(|i| width(detail_text(i), font.size * DETAIL_SCALE))
+            .fold(0.0, f32::max);
+        Self {
+            label: label.clamp(140.0, 420.0),
+            detail: detail.clamp(56.0, 240.0),
+        }
+    }
+
+    fn width(&self) -> f32 {
+        PAD + ICON_WIDTH + self.label + 2.0 * PAD + self.detail + PAD
+    }
+}
+
+const DETAIL_SCALE: f32 = 0.9;
+
+/// Right column text: the owning schema or table, then the kind of item.
+fn detail_text(item: &Item) -> String {
+    let kind = match item.kind {
+        ItemKind::Snippet => None,
+        ItemKind::Column => Some("column"),
+        ItemKind::Table => Some("table"),
+        ItemKind::View => Some("view"),
+        ItemKind::Schema => Some("schema"),
+        ItemKind::Keyword => Some("keyword"),
+    };
+    match (&item.detail, kind) {
+        (Some(d), Some(k)) => format!("{d} · {k}"),
+        (Some(d), None) => d.clone(),
+        (None, k) => k.unwrap_or_default().to_owned(),
+    }
+}
+
+fn row(ui: &mut Ui, columns: &Columns, item: &Item, selected: bool) -> egui::Response {
     let (glyph, c) = match item.kind {
         ItemKind::Column => (icon::COLUMNS, color::text_dim()),
         kind => {
@@ -191,29 +261,70 @@ fn row(ui: &mut Ui, item: &Item, selected: bool) -> egui::Response {
                     icon::SQUARES_FOUR,
                     egui::Color32::from_rgb(0xB3, 0x8B, 0xF2),
                 ),
+                ItemKind::Snippet => (
+                    icon::BRACKETS_CURLY,
+                    egui::Color32::from_rgb(0xE5, 0xB5, 0x67),
+                ),
                 _ => (icon::TEXT_T, egui::Color32::from_rgb(0x6F, 0xA8, 0xFF)),
             };
             (glyph, crate::theme::icon_tint(c))
         }
     };
-    let text = match &item.detail {
-        Some(d) => format!("{glyph}  {}   {d}", item.label),
-        None => format!("{glyph}  {}", item.label),
-    };
-    let label = egui::Button::selectable(
-        selected,
-        RichText::new(text).color(if selected {
-            egui::Color32::WHITE
-        } else {
-            c.lerp_to_gamma(color::text(), 0.5)
-        }),
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), ROW_HEIGHT),
+        egui::Sense::click(),
     );
-    ui.add_sized([ui.available_width(), 20.0], label)
+    let painter = ui.painter_at(rect);
+    if selected {
+        painter.rect_filled(rect, 4, ui.visuals().selection.bg_fill);
+    } else if response.hovered() {
+        painter.rect_filled(rect, 4, ui.visuals().widgets.hovered.weak_bg_fill);
+    }
+    let font = egui::TextStyle::Body.resolve(ui.style());
+    let y = rect.center().y;
+    let (glyph_color, label_color, detail_color) = if selected {
+        let white = egui::Color32::WHITE;
+        (white, white, white.gamma_multiply(0.75))
+    } else {
+        (c, c.lerp_to_gamma(color::text(), 0.5), color::text_faint())
+    };
+    painter.text(
+        egui::pos2(rect.left() + PAD, y),
+        egui::Align2::LEFT_CENTER,
+        glyph,
+        font.clone(),
+        glyph_color,
+    );
+    painter.text(
+        egui::pos2(rect.left() + PAD + ICON_WIDTH, y),
+        egui::Align2::LEFT_CENTER,
+        &item.label,
+        font.clone(),
+        label_color,
+    );
+    let divider = rect.right() - 2.0 * PAD - columns.detail;
+    painter.vline(
+        divider,
+        rect.shrink2(egui::vec2(0.0, 4.0)).y_range(),
+        egui::Stroke::new(1.0, color::text_faint().gamma_multiply(0.5)),
+    );
+    painter.text(
+        egui::pos2(rect.right() - PAD, y),
+        egui::Align2::RIGHT_CENTER,
+        detail_text(item),
+        egui::FontId::new(font.size * DETAIL_SCALE, font.family),
+        detail_color,
+    );
+    response
 }
 
 /// Replaces the accepted range in `text` and moves the editor cursor after the insertion.
 pub fn apply(accepted: Accepted, text: &mut String, ctx: &egui::Context, editor_id: Id) {
-    let Accepted { replace, insert } = accepted;
+    let Accepted {
+        replace,
+        insert,
+        caret,
+    } = accepted;
     if replace.end > text.len()
         || !text.is_char_boundary(replace.start)
         || !text.is_char_boundary(replace.end)
@@ -221,7 +332,10 @@ pub fn apply(accepted: Accepted, text: &mut String, ctx: &egui::Context, editor_
         return;
     }
     text.replace_range(replace.clone(), &insert);
-    let cursor_chars = text[..replace.start + insert.len()].chars().count();
+    let caret = caret
+        .filter(|&c| insert.is_char_boundary(c))
+        .unwrap_or(insert.len());
+    let cursor_chars = text[..replace.start + caret].chars().count();
     if let Some(mut state) = egui::text_edit::TextEditState::load(ctx, editor_id) {
         state
             .cursor

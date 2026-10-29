@@ -458,6 +458,20 @@ pub fn classify(sql: &str) -> StatementKind {
         .unwrap_or(StatementKind::Empty)
 }
 
+/// Whether the server reports a meaningful row count for this single statement (data
+/// modification such as `INSERT`, `UPDATE`, `DELETE`, `MERGE`, `SELECT … INTO`, `COPY`).
+/// Transaction control, DDL and procedure calls report none, or a zero that means nothing.
+pub fn reports_row_count(stmt: &str) -> bool {
+    if classify_statement(stmt) != StatementKind::Write {
+        return false;
+    }
+    let first = tokenize(stmt)
+        .into_iter()
+        .find(|t| matches!(t.kind, TokenKind::Keyword | TokenKind::Identifier))
+        .map(|t| stmt[t.range].to_ascii_uppercase());
+    !matches!(first.as_deref(), Some("CALL" | "EXEC" | "EXECUTE" | "DO"))
+}
+
 fn classify_statement(stmt: &str) -> StatementKind {
     let words: Vec<String> = tokenize(stmt)
         .into_iter()
@@ -611,5 +625,16 @@ mod tests {
         for (sql, expected) in cases {
             assert_eq!(classify(sql), expected, "{sql}");
         }
+    }
+
+    #[test]
+    fn row_counts_only_for_data_modification() {
+        assert!(reports_row_count("UPDATE t SET a = 1"));
+        assert!(reports_row_count("insert into t values (1)"));
+        assert!(reports_row_count("SELECT * INTO t2 FROM t"));
+        assert!(!reports_row_count("SELECT 1"));
+        assert!(!reports_row_count("BEGIN TRANSACTION"));
+        assert!(!reports_row_count("CREATE TABLE t (a int)"));
+        assert!(!reports_row_count("CALL p()"));
     }
 }

@@ -36,7 +36,7 @@ pub use adapter::{
     DatabaseAdapter, MemoryCredentials, SecretKind, unsupported,
 };
 pub use error::{DbError, DbErrorKind};
-pub use message::{Command, Event, QueryOutcome, RequestId};
+pub use message::{Command, Event, QueryOutcome, RequestId, rows_affected_message};
 pub use profile::{
     ConnectionProfile, DatabaseKind, Environment, ProfileId, SshAuth, SshTunnel, SslMode,
 };

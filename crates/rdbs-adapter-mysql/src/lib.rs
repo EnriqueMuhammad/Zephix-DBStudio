@@ -151,6 +151,7 @@ impl MySqlAdapter {
         let conn = self.conn()?;
         let mut result = conn.query_iter(script).await.map_err(map_error)?;
         let mut outcome = QueryOutcome::default();
+        let ranges = rdbs_core::sql::split_statements(script);
         let mut statements = 0usize;
         let mut warnings = 0u64;
 
@@ -186,13 +187,19 @@ impl MySqlAdapter {
                                 .collect(),
                         );
                     }
-                    outcome.results.push(ResultSet {
+                    outcome.push_result(ResultSet {
                         columns: meta,
                         rows,
                     });
                 }
                 _ => {
-                    outcome.rows_affected = Some(result.affected_rows());
+                    // BEGIN, CREATE, … report zero rows; only data changes are listed.
+                    let counted = ranges
+                        .get(statements)
+                        .is_none_or(|r| rdbs_core::sql::reports_row_count(&script[r.clone()]));
+                    if counted {
+                        outcome.record_rows_affected(result.affected_rows());
+                    }
                     while result.next().await.map_err(map_error)?.is_some() {}
                 }
             }
@@ -203,11 +210,6 @@ impl MySqlAdapter {
             }
         }
 
-        if statements > 1 {
-            outcome
-                .messages
-                .push(format!("{statements} statements executed"));
-        }
         if warnings > 0 {
             outcome.messages.push(format!(
                 "{warnings} warning(s) — run SHOW WARNINGS for details"

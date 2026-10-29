@@ -294,7 +294,7 @@ impl MongoAdapter {
             Statement::ShowDatabases => {
                 let names = self.client.list_database_names().await.map_err(map_error)?;
                 let values: Vec<Bson> = names.into_iter().map(Bson::String).collect();
-                outcome.results.push(values_to_result("database", &values));
+                outcome.push_result(values_to_result("database", &values));
             }
             Statement::ShowCollections => {
                 let mut names = db.list_collection_names().await.map_err(map_error)?;
@@ -318,7 +318,7 @@ impl MongoAdapter {
                             .run_command(doc_arg(&args, 0).map_err(query_error)?)
                             .await
                             .map_err(map_error)?;
-                        outcome.results.push(documents_to_result(&[reply]));
+                        outcome.push_result(documents_to_result(&[reply]));
                         return Ok(());
                     }
                     "stats" => doc! {"dbStats": 1},
@@ -343,7 +343,7 @@ impl MongoAdapter {
                     other => return Err(query_error(format!("unsupported db.{other}()"))),
                 };
                 let reply = db.run_command(command).await.map_err(map_error)?;
-                outcome.results.push(documents_to_result(&[reply]));
+                outcome.push_result(documents_to_result(&[reply]));
             }
             Statement::Collection {
                 collection,
@@ -386,7 +386,7 @@ impl MongoAdapter {
                                 "showing the first {DEFAULT_LIMIT} documents; add .limit(n) for more"
                             ));
                         }
-                        outcome.results.push(documents_to_result(&docs));
+                        outcome.push_result(documents_to_result(&docs));
                     }
                     "aggregate" => {
                         let pipeline: Vec<Document> = match args.first() {
@@ -406,7 +406,7 @@ impl MongoAdapter {
                         };
                         let cursor = coll.aggregate(pipeline).await.map_err(map_error)?;
                         let docs = self.collect(cursor, outcome).await?;
-                        outcome.results.push(documents_to_result(&docs));
+                        outcome.push_result(documents_to_result(&docs));
                     }
                     "countDocuments" | "count" => {
                         let n = coll
@@ -431,14 +431,14 @@ impl MongoAdapter {
                             .distinct(field, doc_arg(&args, 1).map_err(query_error)?)
                             .await
                             .map_err(map_error)?;
-                        outcome.results.push(values_to_result(field, &values));
+                        outcome.push_result(values_to_result(field, &values));
                     }
                     "insertOne" => {
                         let r = coll
                             .insert_one(doc_arg(&args, 0).map_err(query_error)?)
                             .await
                             .map_err(map_error)?;
-                        outcome.rows_affected = Some(1);
+                        outcome.record_rows_affected(1);
                         outcome.messages.push(format!("inserted {}", r.inserted_id));
                     }
                     "insertMany" => {
@@ -450,7 +450,7 @@ impl MongoAdapter {
                             .filter_map(|d| d.as_document().cloned())
                             .collect();
                         let r = coll.insert_many(docs).await.map_err(map_error)?;
-                        outcome.rows_affected = Some(r.inserted_ids.len() as u64);
+                        outcome.record_rows_affected(r.inserted_ids.len() as u64);
                         outcome
                             .messages
                             .push(format!("inserted {} document(s)", r.inserted_ids.len()));
@@ -468,7 +468,7 @@ impl MongoAdapter {
                             _ => coll.replace_one(filter, change).upsert(upsert).await,
                         }
                         .map_err(map_error)?;
-                        outcome.rows_affected = Some(r.modified_count);
+                        outcome.record_rows_affected(r.modified_count);
                         outcome.messages.push(format!(
                             "matched {}, modified {}{}",
                             r.matched_count,
@@ -486,7 +486,7 @@ impl MongoAdapter {
                             coll.delete_many(filter).await
                         }
                         .map_err(map_error)?;
-                        outcome.rows_affected = Some(r.deleted_count);
+                        outcome.record_rows_affected(r.deleted_count);
                         outcome
                             .messages
                             .push(format!("deleted {} document(s)", r.deleted_count));
@@ -527,7 +527,7 @@ impl MongoAdapter {
                             }
                             docs.push(d);
                         }
-                        outcome.results.push(documents_to_result(&docs));
+                        outcome.push_result(documents_to_result(&docs));
                     }
                     "dropIndex" => {
                         let Some(Bson::String(name)) = args.first() else {

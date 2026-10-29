@@ -403,7 +403,7 @@ impl RedisAdapter {
             match &value {
                 Value::Okay => outcome.messages.push(format!("{command}: OK")),
                 Value::Int(i) if command.starts_with("DEL") || command.ends_with("SET") => {
-                    outcome.rows_affected = Some(u64::try_from(*i).unwrap_or(0));
+                    outcome.record_rows_affected(u64::try_from(*i).unwrap_or(0));
                     outcome.results.push(to_result(&command, &value));
                 }
                 _ => outcome.results.push(to_result(&command, &value)),

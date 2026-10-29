@@ -13,6 +13,7 @@ mod history;
 mod model;
 mod plan;
 mod scripts;
+mod textops;
 pub mod theme;
 mod tools;
 mod welcome;

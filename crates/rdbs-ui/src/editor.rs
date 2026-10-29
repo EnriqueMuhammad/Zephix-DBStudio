@@ -3,16 +3,17 @@
 use std::time::{Duration, Instant};
 
 use egui::{
-    Align, Button, Frame, Id, Layout, Margin, RichText, ScrollArea, Stroke, TextBuffer, TextEdit,
-    Ui, Vec2,
+    Align, Button, Event, Frame, Id, Key, Layout, Margin, Modifiers, RichText, ScrollArea, Stroke,
+    TextBuffer, TextEdit, Ui, Vec2,
 };
 use egui_phosphor::regular as icon;
 use rdbs_core::sql;
-use rdbs_core::{Command, ConnectionProfile, DbErrorKind};
+use rdbs_core::{Command, ConnectionProfile, DbErrorKind, DbObject, ObjectKind};
 use rdbs_services::ServiceHandle;
 
 use crate::grid;
 use crate::model::{AfterPassword, ConnState, ConnStatus, StatusMessage, UiAction};
+use crate::textops::{self, Selection};
 use crate::theme::{self, color};
 use crate::widgets::{self, format_count, format_duration};
 use crate::workspace::{LastRun, QueryTab, RunState, Running, TabContext};
@@ -319,21 +320,45 @@ fn editor(ui: &mut Ui, q: &mut QueryTab, cx: &mut TabContext<'_>) {
     if std::mem::take(&mut q.run.focus_editor) {
         ui.memory_mut(|m| m.request_focus(editor_id));
     }
+    let word_wrap = pref(ui.ctx(), WORD_WRAP);
+    let white_space = pref(ui.ctx(), WHITE_SPACE);
 
     // Completion keys must be consumed before the text editor handles them.
     let has_focus = ui.memory(|m| m.has_focus(editor_id));
     if let Some(accepted) = q.run.autocomplete.handle_keys(ui, has_focus) {
         crate::autocomplete::apply(accepted, &mut q.sql, ui.ctx(), editor_id);
     }
-    let kind = q.profile_id.and_then(|id| cx.profile(id)).map(|p| p.kind);
-    let objects = q
-        .profile_id
-        .and_then(|id| cx.connections.get(&id))
-        .map_or(&[][..], |c| c.objects.as_slice());
-
+    // So are the editor's own shortcuts and the keys that close brackets and quotes.
     let mut menu_action: Option<EditorAction> = None;
-    let mut layouter = |ui: &Ui, buf: &dyn TextBuffer, _wrap_width: f32| {
-        let job = widgets::highlight_sql(buf.as_str(), &font);
+    if has_focus {
+        menu_action = shortcut_action(ui, editor_id, &q.sql);
+        auto_close(ui, editor_id, q);
+    } else {
+        clear_chord(ui.ctx(), editor_id);
+    }
+    let connections = cx.connections;
+    let conn = q.profile_id.and_then(|id| connections.get(&id));
+    let kind = q.profile_id.and_then(|id| cx.profile(id)).map(|p| p.kind);
+    // Engines with several databases per server complete from the tab's database.
+    let database = kind.filter(|k| k.has_schemas()).and_then(|_| {
+        q.database
+            .clone()
+            .or_else(|| conn?.default_database.clone())
+    });
+    if has_focus {
+        load_tab_database(q, conn, database.as_deref(), cx.actions);
+    }
+    let objects = conn.map_or(&[][..], |c| {
+        completion_objects(&c.objects, database.as_deref())
+    });
+
+    let mut layouter = |ui: &Ui, buf: &dyn TextBuffer, wrap_width: f32| {
+        let mut job = if white_space {
+            widgets::highlight_sql_whitespace(buf.as_str(), &font)
+        } else {
+            widgets::highlight_sql(buf.as_str(), &font)
+        };
+        job.wrap.max_width = if word_wrap { wrap_width } else { f32::INFINITY };
         ui.ctx().fonts_mut(|f| f.layout_job(job))
     };
 
@@ -341,7 +366,12 @@ fn editor(ui: &mut Ui, q: &mut QueryTab, cx: &mut TabContext<'_>) {
     // Solid bars stay visible. The default floating bars fade out, so a long line
     // looks clipped even though it can be scrolled.
     ui.spacing_mut().scroll = egui::style::ScrollStyle::solid();
-    let scrolled = ScrollArea::both()
+    let scroll = if word_wrap {
+        ScrollArea::vertical()
+    } else {
+        ScrollArea::both()
+    };
+    let scrolled = scroll
         .id_salt(("editor-scroll", q.id))
         .auto_shrink(false)
         .stick_to_bottom(false)
@@ -350,40 +380,33 @@ fn editor(ui: &mut Ui, q: &mut QueryTab, cx: &mut TabContext<'_>) {
             let lines = q.sql.split('\n').count().max(1);
             let digits = lines.to_string().len().max(2) as f32;
             let gutter_width = 16.0 + digits * 8.0;
-            let width_id = Id::new(("editor-width", q.id));
-            let remembered = ui
-                .ctx()
-                .data(|data| data.get_temp::<f32>(width_id).unwrap_or(0.0));
-            let estimated = q
-                .sql
-                .lines()
-                .map(|line| line.chars().count())
-                .max()
-                .unwrap_or(0) as f32
-                * 8.0;
-            let min_width = remembered.max(estimated);
+            let min_width = if word_wrap {
+                0.0
+            } else {
+                let width_id = Id::new(("editor-width", q.id));
+                let remembered = ui
+                    .ctx()
+                    .data(|data| data.get_temp::<f32>(width_id).unwrap_or(0.0));
+                let estimated = q
+                    .sql
+                    .lines()
+                    .map(|line| line.chars().count())
+                    .max()
+                    .unwrap_or(0) as f32
+                    * 8.0;
+                remembered.max(estimated)
+            };
             // egui's scroll area asks its content to fit the viewport. A minimum wider
             // than that is what makes the horizontal bar appear for a long line.
             ui.set_min_width(gutter_width + 8.0 + min_width);
             ui.horizontal_top(|ui| {
                 ui.spacing_mut().item_spacing.x = 0.0;
-                let numbers = (1..=lines)
-                    .map(|n| n.to_string())
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                ui.allocate_ui_with_layout(
-                    Vec2::new(gutter_width, lines as f32 * row_height),
-                    Layout::top_down(Align::Max),
-                    |ui| {
-                        ui.add_space(2.0);
-                        ui.label(
-                            RichText::new(numbers)
-                                .font(font.clone())
-                                .color(color::text_faint()),
-                        );
-                    },
+                // The numbers are painted once the rows are known: a wrapped line spans
+                // several rows.
+                let (gutter, _) = ui.allocate_exact_size(
+                    Vec2::new(gutter_width + 8.0, row_height),
+                    egui::Sense::hover(),
                 );
-                ui.add_space(8.0);
 
                 let min_height = ui.available_height();
                 let output = TextEdit::multiline(&mut q.sql)
@@ -396,11 +419,14 @@ fn editor(ui: &mut Ui, q: &mut QueryTab, cx: &mut TabContext<'_>) {
                     .min_size(Vec2::new(min_width, min_height))
                     .layouter(&mut layouter)
                     .show(ui);
+                paint_line_numbers(ui, gutter.right() - 8.0, &output, &font);
                 let has_selection = output
                     .cursor_range
                     .is_some_and(|r| r.primary.index != r.secondary.index);
                 output.response.context_menu(|ui| {
-                    menu_action = editor_menu(ui, has_selection);
+                    if let Some(action) = editor_menu(ui, has_selection, word_wrap, white_space) {
+                        menu_action = Some(action);
+                    }
                 });
 
                 q.run.cursor = output.cursor_range.map(|range| {
@@ -440,6 +466,337 @@ fn editor(ui: &mut Ui, q: &mut QueryTab, cx: &mut TabContext<'_>) {
     if let Some(action) = menu_action {
         apply_editor_action(ui.ctx(), editor_id, action, q, cx);
     }
+}
+
+/// Line numbers right-aligned at `right`, next to the first row of each line.
+fn paint_line_numbers(
+    ui: &Ui,
+    right: f32,
+    output: &egui::text_edit::TextEditOutput,
+    font: &egui::FontId,
+) {
+    let clip = ui.clip_rect();
+    let mut line = 1;
+    let mut starts_line = true;
+    for row in &output.galley.rows {
+        let rect = row.rect().translate(output.galley_pos.to_vec2());
+        if starts_line && rect.bottom() >= clip.top() && rect.top() <= clip.bottom() {
+            ui.painter().text(
+                egui::pos2(right, rect.top()),
+                egui::Align2::RIGHT_TOP,
+                line.to_string(),
+                font.clone(),
+                color::text_faint(),
+            );
+        }
+        starts_line = row.ends_with_newline;
+        if starts_line {
+            line += 1;
+        }
+    }
+}
+
+/// Objects completion draws on: the tree of `database` when the explorer lists it (so other
+/// databases' tables stay out), else the whole tree.
+fn completion_objects<'o>(objects: &'o [DbObject], database: Option<&str>) -> &'o [DbObject] {
+    database
+        .and_then(|db| {
+            objects
+                .iter()
+                .position(|o| o.kind == ObjectKind::Database && o.name == db)
+        })
+        .map_or(objects, |i| &objects[i..=i])
+}
+
+/// Loads the objects of the tab's database when the explorer has not yet (databases other
+/// than the session's load when first expanded), so completion knows its tables. Asked once
+/// per tab and database, also when loading fails.
+fn load_tab_database(
+    q: &mut QueryTab,
+    conn: Option<&ConnState>,
+    database: Option<&str>,
+    actions: &mut Vec<UiAction>,
+) {
+    let (Some(conn), Some(db), Some(profile_id)) = (conn, database, q.profile_id) else {
+        return;
+    };
+    let unloaded = conn.objects.iter().any(|o| {
+        o.kind == ObjectKind::Database
+            && o.name == db
+            && o.children.is_empty()
+            && o.detail.as_deref() == Some(rdbs_core::schema::NOT_LOADED)
+    });
+    if conn.is_connected()
+        && unloaded
+        && !conn.loading_databases.contains(db)
+        && q.run.catalog_requested.as_deref() != Some(db)
+    {
+        q.run.catalog_requested = Some(db.to_owned());
+        actions.push(UiAction::LoadDatabase {
+            profile_id,
+            database: db.to_owned(),
+        });
+    }
+}
+
+/// Persisted editor view options, shared by all query tabs.
+const WORD_WRAP: &str = "editor-word-wrap";
+const WHITE_SPACE: &str = "editor-white-space";
+
+fn pref(ctx: &egui::Context, key: &str) -> bool {
+    ctx.data_mut(|d| *d.get_persisted_mut_or_default::<bool>(Id::new(key)))
+}
+
+fn toggle_pref(ctx: &egui::Context, key: &str) {
+    ctx.data_mut(|d| {
+        let value = d.get_persisted_mut_or_default::<bool>(Id::new(key));
+        *value = !*value;
+    });
+}
+
+/// First key of a two-key shortcut (Ctrl+K, Ctrl+C), waiting for the second.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Chord {
+    CtrlK,
+    CtrlE,
+    ShiftAltL,
+}
+
+fn chord_id() -> Id {
+    Id::new("editor-chord")
+}
+
+/// Whether an editor waits for the second key of a shortcut; the global shortcuts then leave
+/// the keyboard to it (Ctrl+E, Ctrl+W toggles word wrap instead of closing the tab).
+pub fn chord_pending(ctx: &egui::Context) -> bool {
+    ctx.data(|d| d.get_temp::<(Id, Chord)>(chord_id()).is_some())
+}
+
+/// Forgets a chord started in `editor_id` once that editor lost focus.
+fn clear_chord(ctx: &egui::Context, editor_id: Id) {
+    ctx.data_mut(|d| {
+        if d.get_temp::<(Id, Chord)>(chord_id())
+            .is_some_and(|(owner, _)| owner == editor_id)
+        {
+            d.remove::<(Id, Chord)>(chord_id());
+        }
+    });
+}
+
+/// Removes a key press with exactly these modifiers from this frame's input.
+fn take_key(i: &mut egui::InputState, modifiers: Modifiers, key: Key) -> bool {
+    let found = i.events.iter().position(|e| {
+        matches!(e, Event::Key { key: k, pressed: true, modifiers: m, .. }
+            if *k == key && m.matches_exact(modifiers))
+    });
+    found.map(|p| i.events.remove(p)).is_some()
+}
+
+/// Editor shortcuts, read before the text editor so it does not act on the same keys (it
+/// binds Ctrl+K and Ctrl+U to line deletions).
+fn shortcut_action(ui: &mut Ui, editor_id: Id, text: &str) -> Option<EditorAction> {
+    use EditorAction as A;
+    const CTRL: Modifiers = Modifiers::COMMAND;
+    let ctrl_shift = Modifiers::COMMAND.plus(Modifiers::SHIFT);
+    let ctrl_alt = Modifiers::COMMAND.plus(Modifiers::ALT);
+    let shift_alt = Modifiers::SHIFT.plus(Modifiers::ALT);
+    let ctx = ui.ctx().clone();
+    let chord = ctx
+        .data(|d| d.get_temp::<(Id, Chord)>(chord_id()))
+        .filter(|(owner, _)| *owner == editor_id)
+        .map(|(_, c)| c);
+    let multiline = egui::text_edit::TextEditState::load(&ctx, editor_id)
+        .and_then(|s| s.cursor.char_range())
+        .is_some_and(|r| {
+            let r = r.as_sorted_char_range();
+            text.chars()
+                .skip(r.start.0)
+                .take(r.end.0 - r.start.0)
+                .any(|c| c == '\n')
+        });
+    let (action, next) = ui.input_mut(|i| {
+        if let Some(chord) = chord {
+            let action = match chord {
+                Chord::CtrlK => {
+                    // Ctrl+C arrives as a copy request on most platforms.
+                    if let Some(p) = i.events.iter().position(|e| matches!(e, Event::Copy)) {
+                        i.events.remove(p);
+                        Some(A::Comment)
+                    } else if take_key(i, CTRL, Key::C) {
+                        Some(A::Comment)
+                    } else if take_key(i, CTRL, Key::U) {
+                        Some(A::Uncomment)
+                    } else if take_key(i, CTRL, Key::Backslash) {
+                        Some(A::DeleteWhiteSpace)
+                    } else {
+                        None
+                    }
+                }
+                Chord::CtrlE => {
+                    if take_key(i, CTRL, Key::W) {
+                        Some(A::ToggleWordWrap)
+                    } else if take_key(i, CTRL, Key::S) {
+                        Some(A::ToggleWhiteSpace)
+                    } else {
+                        None
+                    }
+                }
+                Chord::ShiftAltL => {
+                    if take_key(i, shift_alt, Key::S) {
+                        Some(A::SortLines)
+                    } else if take_key(i, shift_alt, Key::J) {
+                        Some(A::JoinLines)
+                    } else {
+                        None
+                    }
+                }
+            };
+            // Any other key ends the chord and is handled as usual.
+            let other_key = i.events.iter().any(|e| {
+                matches!(
+                    e,
+                    Event::Key { pressed: true, .. }
+                        | Event::Text(_)
+                        | Event::Copy
+                        | Event::Cut
+                        | Event::Paste(_)
+                )
+            });
+            let waiting = action.is_none() && !other_key;
+            return (action, waiting.then_some(chord));
+        }
+        if take_key(i, CTRL, Key::K) {
+            return (None, Some(Chord::CtrlK));
+        }
+        if take_key(i, CTRL, Key::E) {
+            return (None, Some(Chord::CtrlE));
+        }
+        if take_key(i, shift_alt, Key::L) {
+            return (None, Some(Chord::ShiftAltL));
+        }
+        let shift_ctrl_alt = ctrl_alt.plus(Modifiers::SHIFT);
+        let action = if take_key(i, ctrl_shift, Key::U) {
+            Some(A::Uppercase)
+        } else if take_key(i, ctrl_shift, Key::L) {
+            Some(A::Lowercase)
+        } else if take_key(i, Modifiers::ALT, Key::ArrowUp) {
+            Some(A::MoveLinesUp)
+        } else if take_key(i, Modifiers::ALT, Key::ArrowDown) {
+            Some(A::MoveLinesDown)
+        } else if take_key(i, ctrl_alt, Key::ArrowRight) {
+            Some(A::Subword {
+                forward: true,
+                extend: false,
+            })
+        } else if take_key(i, shift_ctrl_alt, Key::ArrowRight) {
+            Some(A::Subword {
+                forward: true,
+                extend: true,
+            })
+        } else if take_key(i, ctrl_alt, Key::ArrowLeft) {
+            Some(A::Subword {
+                forward: false,
+                extend: false,
+            })
+        } else if take_key(i, shift_ctrl_alt, Key::ArrowLeft) {
+            Some(A::Subword {
+                forward: false,
+                extend: true,
+            })
+        } else if take_key(i, shift_alt, Key::E) {
+            Some(A::ExpandToLine)
+        } else if take_key(i, Modifiers::SHIFT, Key::Tab) {
+            Some(A::DecreaseIndent)
+        } else if multiline && take_key(i, Modifiers::NONE, Key::Tab) {
+            Some(A::IncreaseIndent)
+        } else {
+            None
+        };
+        (action, None)
+    });
+    ctx.data_mut(|d| match next {
+        Some(chord) => {
+            d.insert_temp(chord_id(), (editor_id, chord));
+        }
+        None => {
+            d.remove::<(Id, Chord)>(chord_id());
+        }
+    });
+    action
+}
+
+/// Closes brackets and quotes as they are typed and deletes an empty pair with Backspace
+/// ([`textops::type_char`], [`textops::backspace`]). Only the first edit of a frame is taken
+/// over, so keys typed after it in the same frame still apply in order.
+fn auto_close(ui: &mut Ui, editor_id: Id, q: &mut QueryTab) {
+    let ctx = ui.ctx().clone();
+    let Some(sel) = current_selection(&ctx, editor_id) else {
+        return;
+    };
+    let edit = ui.input_mut(|i| {
+        let first = i.events.iter().position(|e| {
+            matches!(
+                e,
+                Event::Text(_) | Event::Paste(_) | Event::Ime(_) | Event::Key { pressed: true, .. }
+            )
+        })?;
+        let edit = match &i.events[first] {
+            Event::Text(t) => {
+                let mut chars = t.chars();
+                match (chars.next(), chars.next()) {
+                    (Some(c), None) => textops::type_char(&q.sql, sel, c),
+                    _ => None,
+                }
+            }
+            Event::Key {
+                key: Key::Backspace,
+                pressed: true,
+                modifiers,
+                ..
+            } if modifiers.is_none() => textops::backspace(&q.sql, sel),
+            _ => None,
+        }?;
+        i.events.remove(first);
+        Some(edit)
+    });
+    if let Some(edit) = edit {
+        apply_edit(&ctx, editor_id, q, edit);
+    }
+}
+
+/// The editor's selection in characters.
+fn current_selection(ctx: &egui::Context, editor_id: Id) -> Option<Selection> {
+    let range = egui::text_edit::TextEditState::load(ctx, editor_id)?
+        .cursor
+        .char_range()?;
+    Some(Selection::new(
+        range.secondary.index.0,
+        range.primary.index.0,
+    ))
+}
+
+fn set_selection(ctx: &egui::Context, editor_id: Id, sel: Selection) {
+    let mut state = egui::text_edit::TextEditState::load(ctx, editor_id).unwrap_or_default();
+    state
+        .cursor
+        .set_char_range(Some(egui::text::CCursorRange::two(
+            egui::text::CCursor::new(sel.anchor),
+            egui::text::CCursor::new(sel.caret),
+        )));
+    state.store(ctx, editor_id);
+}
+
+/// Replaces the editor text with `edit`, as one undo step.
+fn apply_edit(ctx: &egui::Context, editor_id: Id, q: &mut QueryTab, edit: textops::Edit) {
+    let mut state = egui::text_edit::TextEditState::load(ctx, editor_id).unwrap_or_default();
+    if let Some(range) = state.cursor.char_range() {
+        let mut undoer = state.undoer();
+        undoer.add_undo(&(range, q.sql.clone()));
+        state.set_undoer(undoer);
+    }
+    q.sql = edit.text;
+    state.store(ctx, editor_id);
+    set_selection(ctx, editor_id, edit.selection);
 }
 
 /// While a selection drag is held outside the editor, scroll toward the pointer and
@@ -524,7 +881,7 @@ fn outside_speed(pointer: f32, min: f32, max: f32) -> f32 {
     }
 }
 
-/// Commands of the editor's context menu.
+/// Commands of the editor's context menu and shortcuts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EditorAction {
     Cut,
@@ -532,9 +889,32 @@ enum EditorAction {
     Paste,
     SelectAll,
     Run,
+    Tabify,
+    Untabify,
+    Uppercase,
+    Lowercase,
+    MoveLinesUp,
+    MoveLinesDown,
+    DeleteWhiteSpace,
+    ToggleWhiteSpace,
+    ToggleWordWrap,
+    SortLines,
+    JoinLines,
+    Subword { forward: bool, extend: bool },
+    ExpandToLine,
+    Comment,
+    Uncomment,
+    IncreaseIndent,
+    DecreaseIndent,
 }
 
-fn editor_menu(ui: &mut Ui, has_selection: bool) -> Option<EditorAction> {
+fn editor_menu(
+    ui: &mut Ui,
+    has_selection: bool,
+    word_wrap: bool,
+    white_space: bool,
+) -> Option<EditorAction> {
+    use EditorAction as A;
     let mut action = None;
     let mut item = |ui: &mut Ui, enabled: bool, glyph: &str, label: &str, keys: &str, a| {
         let button = Button::new(format!("{glyph}  {label}")).shortcut_text(keys);
@@ -542,30 +922,9 @@ fn editor_menu(ui: &mut Ui, has_selection: bool) -> Option<EditorAction> {
             action = Some(a);
         }
     };
-    item(
-        ui,
-        has_selection,
-        icon::SCISSORS,
-        "Cut",
-        "Ctrl+X",
-        EditorAction::Cut,
-    );
-    item(
-        ui,
-        has_selection,
-        icon::COPY,
-        "Copy",
-        "Ctrl+C",
-        EditorAction::Copy,
-    );
-    item(
-        ui,
-        true,
-        icon::CLIPBOARD_TEXT,
-        "Paste",
-        "Ctrl+V",
-        EditorAction::Paste,
-    );
+    item(ui, has_selection, icon::SCISSORS, "Cut", "Ctrl+X", A::Cut);
+    item(ui, has_selection, icon::COPY, "Copy", "Ctrl+C", A::Copy);
+    item(ui, true, icon::CLIPBOARD_TEXT, "Paste", "Ctrl+V", A::Paste);
     ui.separator();
     item(
         ui,
@@ -573,20 +932,177 @@ fn editor_menu(ui: &mut Ui, has_selection: bool) -> Option<EditorAction> {
         icon::SELECTION_ALL,
         "Select All",
         "Ctrl+A",
-        EditorAction::SelectAll,
+        A::SelectAll,
     );
+    ui.separator();
+    item(
+        ui,
+        true,
+        icon::CHAT_CENTERED_SLASH,
+        "Comment Selection",
+        "Ctrl+K, Ctrl+C",
+        A::Comment,
+    );
+    item(
+        ui,
+        true,
+        icon::CHAT_CENTERED,
+        "Uncomment Selection",
+        "Ctrl+K, Ctrl+U",
+        A::Uncomment,
+    );
+    ui.menu_button(format!("{}  Advanced", icon::TEXT_AA), |ui| {
+        let blank = " ";
+        item(
+            ui,
+            true,
+            icon::ARROW_LINE_RIGHT,
+            "Tabify Selected Lines",
+            "",
+            A::Tabify,
+        );
+        item(
+            ui,
+            true,
+            icon::ARROW_LINE_LEFT,
+            "Untabify Selected Lines",
+            "",
+            A::Untabify,
+        );
+        item(
+            ui,
+            true,
+            icon::TEXT_AA,
+            "Make Uppercase",
+            "Ctrl+Shift+U",
+            A::Uppercase,
+        );
+        item(
+            ui,
+            true,
+            blank,
+            "Make Lowercase",
+            "Ctrl+Shift+L",
+            A::Lowercase,
+        );
+        item(
+            ui,
+            true,
+            icon::ARROW_UP,
+            "Move Selected Lines Up",
+            "Alt+Up Arrow",
+            A::MoveLinesUp,
+        );
+        item(
+            ui,
+            true,
+            icon::ARROW_DOWN,
+            "Move Selected Lines Down",
+            "Alt+Down Arrow",
+            A::MoveLinesDown,
+        );
+        item(
+            ui,
+            true,
+            blank,
+            "Delete Horizontal White Space",
+            "Ctrl+K, Ctrl+\\",
+            A::DeleteWhiteSpace,
+        );
+        let check = |on: bool| if on { icon::CHECK } else { " " };
+        item(
+            ui,
+            true,
+            check(white_space),
+            "View White Space",
+            "Ctrl+E, Ctrl+S",
+            A::ToggleWhiteSpace,
+        );
+        item(
+            ui,
+            true,
+            check(word_wrap),
+            "Word Wrap",
+            "Ctrl+E, Ctrl+W",
+            A::ToggleWordWrap,
+        );
+        ui.separator();
+        item(
+            ui,
+            true,
+            icon::SORT_ASCENDING,
+            "Sort Lines",
+            "Shift+Alt+L, Shift+Alt+S",
+            A::SortLines,
+        );
+        item(
+            ui,
+            true,
+            blank,
+            "Join Lines",
+            "Shift+Alt+L, Shift+Alt+J",
+            A::JoinLines,
+        );
+        item(
+            ui,
+            true,
+            blank,
+            "Next Subword",
+            "Ctrl+Alt+Right Arrow",
+            A::Subword {
+                forward: true,
+                extend: false,
+            },
+        );
+        item(
+            ui,
+            true,
+            blank,
+            "Previous Subword",
+            "Ctrl+Alt+Left Arrow",
+            A::Subword {
+                forward: false,
+                extend: false,
+            },
+        );
+        item(
+            ui,
+            true,
+            blank,
+            "Expand Selection to Line",
+            "Shift+Alt+E",
+            A::ExpandToLine,
+        );
+        ui.separator();
+        item(
+            ui,
+            true,
+            icon::TEXT_INDENT,
+            "Increase Line Indent",
+            "Tab",
+            A::IncreaseIndent,
+        );
+        item(
+            ui,
+            true,
+            icon::TEXT_OUTDENT,
+            "Decrease Line Indent",
+            "Shift+Tab",
+            A::DecreaseIndent,
+        );
+    });
     ui.separator();
     let run = if has_selection {
         "Run Selection"
     } else {
         "Run"
     };
-    item(ui, true, icon::PLAY, run, "Ctrl+Enter", EditorAction::Run);
+    item(ui, true, icon::PLAY, run, "Ctrl+Enter", A::Run);
     action
 }
 
-/// Carries out a context-menu command. Clipboard commands go through the platform clipboard
-/// (the backend turns them into the same events as the keyboard shortcuts).
+/// Carries out a context-menu or shortcut command. Clipboard commands go through the platform
+/// clipboard (the backend turns them into the same events as the keyboard shortcuts).
 fn apply_editor_action(
     ctx: &egui::Context,
     editor_id: Id,
@@ -594,24 +1110,65 @@ fn apply_editor_action(
     q: &mut QueryTab,
     cx: &mut TabContext<'_>,
 ) {
+    use EditorAction as A;
     ctx.memory_mut(|m| m.request_focus(editor_id));
-    match action {
-        EditorAction::Cut => ctx.send_viewport_cmd(egui::ViewportCommand::RequestCut),
-        EditorAction::Copy => ctx.send_viewport_cmd(egui::ViewportCommand::RequestCopy),
-        EditorAction::Paste => ctx.send_viewport_cmd(egui::ViewportCommand::RequestPaste),
-        EditorAction::SelectAll => {
-            let mut state =
-                egui::text_edit::TextEditState::load(ctx, editor_id).unwrap_or_default();
-            let end = q.sql.chars().count();
-            state
-                .cursor
-                .set_char_range(Some(egui::text::CCursorRange::two(
-                    egui::text::CCursor::new(0),
-                    egui::text::CCursor::new(end),
-                )));
-            state.store(ctx, editor_id);
+    let sel = current_selection(ctx, editor_id).unwrap_or(Selection::caret(0));
+    let text = q.sql.as_str();
+    let edit = match action {
+        A::Cut => {
+            ctx.send_viewport_cmd(egui::ViewportCommand::RequestCut);
+            None
         }
-        EditorAction::Run => request_run(q, cx),
+        A::Copy => {
+            ctx.send_viewport_cmd(egui::ViewportCommand::RequestCopy);
+            None
+        }
+        A::Paste => {
+            ctx.send_viewport_cmd(egui::ViewportCommand::RequestPaste);
+            None
+        }
+        A::SelectAll => {
+            set_selection(ctx, editor_id, Selection::new(0, text.chars().count()));
+            None
+        }
+        A::Run => {
+            request_run(q, cx);
+            None
+        }
+        A::ToggleWhiteSpace => {
+            toggle_pref(ctx, WHITE_SPACE);
+            None
+        }
+        A::ToggleWordWrap => {
+            toggle_pref(ctx, WORD_WRAP);
+            None
+        }
+        A::Subword { forward, extend } => {
+            let caret = textops::subword(text, sel.caret, forward);
+            let anchor = if extend { sel.anchor } else { caret };
+            set_selection(ctx, editor_id, Selection::new(anchor, caret));
+            None
+        }
+        A::ExpandToLine => {
+            set_selection(ctx, editor_id, textops::expand_to_line(text, sel));
+            None
+        }
+        A::Tabify => textops::retab(text, sel, true),
+        A::Untabify => textops::retab(text, sel, false),
+        A::Uppercase => textops::change_case(text, sel, true),
+        A::Lowercase => textops::change_case(text, sel, false),
+        A::MoveLinesUp => textops::move_lines(text, sel, true),
+        A::MoveLinesDown => textops::move_lines(text, sel, false),
+        A::DeleteWhiteSpace => textops::delete_horizontal_whitespace(text, sel),
+        A::SortLines => textops::sort_lines(text, sel),
+        A::JoinLines => textops::join_lines(text, sel),
+        A::Comment => textops::toggle_comment(text, sel, true),
+        A::Uncomment => textops::toggle_comment(text, sel, false),
+        A::IncreaseIndent => textops::indent_lines(text, sel, true),
+        A::DecreaseIndent => textops::indent_lines(text, sel, false),
+    };
+    if let Some(edit) = edit {
+        apply_edit(ctx, editor_id, q, edit);
     }
 }
 
@@ -981,7 +1538,7 @@ fn results(ui: &mut Ui, q: &mut QueryTab, cx: &mut TabContext<'_>) {
                     });
                 match rs {
                     Some(rs) if !*show_messages => {
-                        let mode = matches!(edit_state, Some(Editability::Editable))
+                        let mode = matches!(edit_state, Some(Editability::Editable(_)))
                             .then_some(grid::EditMode { edits, editing });
                         grid::show(ui, Id::new(("grid", q.id, 0)), rs, grid_state, mode);
                     }
@@ -1091,7 +1648,7 @@ fn results(ui: &mut Ui, q: &mut QueryTab, cx: &mut TabContext<'_>) {
                             cx.actions,
                         );
                     }
-                    let mode = matches!(edit_state, Some(Editability::Editable))
+                    let mode = matches!(edit_state, Some(Editability::Editable(_)))
                         .then_some(grid::EditMode { edits, editing });
                     grid::show(
                         ui,
@@ -1144,7 +1701,7 @@ fn stacked_results(
 
 /// Whether the grid of a table tab can be edited.
 enum Editability {
-    Editable,
+    Editable(rdbs_core::edit::RowMatch),
     ReadOnly(String),
 }
 
@@ -1153,28 +1710,26 @@ fn editability(
     rs: &rdbs_core::ResultSet,
     sets: usize,
 ) -> Editability {
-    if table.primary_key.is_empty() {
-        return Editability::ReadOnly("read-only: the table has no primary key".into());
-    }
+    use rdbs_core::edit::EditError;
     if sets != 1 {
         return Editability::ReadOnly("read-only: the script returned several result sets".into());
     }
-    let missing: Vec<&String> = table
-        .primary_key
-        .iter()
-        .filter(|k| !rs.columns.iter().any(|c| c.name.eq_ignore_ascii_case(k)))
-        .collect();
-    if !missing.is_empty() {
-        return Editability::ReadOnly(format!(
-            "read-only: include primary key column(s) {} to edit",
-            missing
-                .iter()
-                .map(|s| s.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
-        ));
+    match rdbs_core::edit::row_match(table, rs) {
+        Ok(m) => Editability::Editable(m),
+        Err(e) => Editability::ReadOnly(match e {
+            EditError::NoPrimaryKey => "read-only: the table has no primary key".into(),
+            EditError::MissingKeyColumn(k) => {
+                format!("read-only: include primary key column {k} to edit")
+            }
+            EditError::MissingColumn(c) => {
+                format!("read-only: no primary key; include all columns ({c} is missing) to edit")
+            }
+            EditError::NoComparableColumn => {
+                "read-only: no primary key and no column that can be compared".into()
+            }
+            EditError::UnusableKey(_) => format!("read-only: {e}"),
+        }),
     }
-    Editability::Editable
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1215,14 +1770,17 @@ fn edit_actions(
     grid_state: &mut grid::GridState,
     saving: bool,
 ) -> bool {
-    if let Editability::ReadOnly(reason) = state {
-        ui.label(
-            RichText::new(format!("{}  {reason}", icon::LOCK))
-                .size(12.0)
-                .color(color::text_faint()),
-        );
-        return false;
-    }
+    let row_match = match state {
+        Editability::Editable(m) => *m,
+        Editability::ReadOnly(reason) => {
+            ui.label(
+                RichText::new(format!("{}  {reason}", icon::LOCK))
+                    .size(12.0)
+                    .color(color::text_faint()),
+            );
+            return false;
+        }
+    };
     ui.add_enabled_ui(!saving, |ui| {
         if ui
             .button(format!("{}  Row", icon::PLUS))
@@ -1248,6 +1806,20 @@ fn edit_actions(
             edits.toggle_delete(r);
         }
     });
+    if row_match == rdbs_core::edit::RowMatch::AllColumns {
+        // Icon only while changes are pending, to leave room for the count and save buttons.
+        let text = if edits.is_empty() {
+            format!("{}  no primary key", icon::WARNING)
+        } else {
+            icon::WARNING.to_owned()
+        };
+        ui.label(RichText::new(text).size(12.0).color(color::warning()))
+            .on_hover_text(
+                "Rows are found by the values of all their columns. A change that would touch \
+             more than one row is rolled back; of identical rows shown in the grid, one is \
+             changed.",
+            );
+    }
     if edits.is_empty() {
         ui.label(
             RichText::new("Double-click a cell to edit")
@@ -1391,41 +1963,35 @@ fn export_menu(
     }
 }
 
+/// Messages view: one line per statement in execution order ("(3 rows affected)"), server
+/// messages, then when and how long the script ran.
 fn messages(ui: &mut Ui, last: &LastRun) {
     let Ok(outcome) = &last.outcome else { return };
     ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
         Frame::new().inner_margin(Margin::same(12)).show(ui, |ui| {
             let mono = theme::mono();
             let mut line = |text: String, c| {
-                ui.label(RichText::new(text).font(mono.clone()).color(c));
-            };
-            line(
-                format!("{}  Query OK", icon::CHECK_CIRCLE),
-                color::success(),
-            );
-            for (i, rs) in outcome.results.iter().enumerate() {
-                let prefix = if outcome.results.len() > 1 {
-                    format!("Result {}: ", i + 1)
-                } else {
-                    String::new()
-                };
-                line(
-                    format!(
-                        "{prefix}{} rows returned",
-                        format_count(rs.rows.len() as u64)
-                    ),
-                    color::text(),
+                ui.add(
+                    egui::Label::new(RichText::new(text).font(mono.clone()).color(c))
+                        .selectable(true),
                 );
-            }
-            if let Some(n) = outcome.rows_affected {
-                line(format!("{} rows affected", format_count(n)), color::text());
+            };
+            if outcome.messages.is_empty() {
+                line("Commands completed successfully.".to_owned(), color::text());
             }
             for m in &outcome.messages {
-                line(m.clone(), color::text_dim());
+                let c = if m.starts_with('(') {
+                    color::text()
+                } else {
+                    color::text_dim()
+                };
+                line(m.clone(), c);
             }
+            line(String::new(), color::text());
             line(
                 format!(
-                    "Time: {}  ·  Connection: {}",
+                    "Completion time: {}  ·  {}  ·  {}",
+                    last.finished.format("%Y-%m-%d %H:%M:%S"),
                     format_duration(last.elapsed),
                     last.profile_name
                 ),

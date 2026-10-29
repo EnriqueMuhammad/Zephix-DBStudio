@@ -1,6 +1,6 @@
-//! T-SQL script handling: `GO` batch separators and DML detection.
+//! T-SQL script handling: `GO` batch separators.
 
-use rdbs_core::sql::{self, TokenKind};
+use rdbs_core::sql;
 
 /// Splits a script into batches on lines consisting of `GO` (optionally `GO n`), as SSMS and
 /// `sqlcmd` do. Blank batches are dropped. A repeat count is ignored.
@@ -25,27 +25,6 @@ pub fn split_batches(script: &str) -> Vec<&str> {
     batches
 }
 
-/// Whether a batch is a single plain DML statement, for which the affected row count is
-/// reported (it runs through `sp_executesql`, which returns counts but no result sets).
-pub fn is_plain_dml(batch: &str) -> bool {
-    let statements = sql::split_statements(batch);
-    let [range] = statements.as_slice() else {
-        return false;
-    };
-    let stmt = &batch[range.clone()];
-    let first = sql::tokenize(stmt)
-        .into_iter()
-        .find(|t| matches!(t.kind, TokenKind::Keyword | TokenKind::Identifier))
-        .map(|t| stmt[t.range].to_ascii_uppercase());
-    let has_output = sql::tokenize(stmt)
-        .iter()
-        .any(|t| stmt[t.range.clone()].eq_ignore_ascii_case("OUTPUT"));
-    matches!(
-        first.as_deref(),
-        Some("INSERT" | "UPDATE" | "DELETE" | "MERGE")
-    ) && !has_output
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -67,14 +46,5 @@ mod tests {
         );
         assert_eq!(split_batches("é\nselect 1"), vec!["é\nselect 1"]);
         assert!(split_batches("GO\n  \nGO").is_empty());
-    }
-
-    #[test]
-    fn detects_plain_dml() {
-        assert!(is_plain_dml("UPDATE t SET a = 1 WHERE id = 2;"));
-        assert!(!is_plain_dml("UPDATE t SET a = 1 OUTPUT inserted.*"));
-        assert!(!is_plain_dml("SELECT 1"));
-        assert!(!is_plain_dml("UPDATE t SET a = 1; SELECT @@ROWCOUNT"));
-        assert!(!is_plain_dml("EXEC usp_do_things"));
     }
 }
