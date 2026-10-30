@@ -4745,7 +4745,7 @@ checksum = "20675572f6f24e9e76ef639bc5552774ed45f1c30e2951e1e99c59888861c539"
 
 [[package]]
 name = "rdbs-adapter-mock"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "rdbs-core",
  "tokio",
@@ -4753,7 +4753,7 @@ dependencies = [
 
 [[package]]
 name = "rdbs-adapter-mongodb"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "futures-util",
  "mongodb",
@@ -4765,7 +4765,7 @@ dependencies = [
 
 [[package]]
 name = "rdbs-adapter-mssql"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "chrono",
  "futures-util",
@@ -4779,7 +4779,7 @@ dependencies = [
 
 [[package]]
 name = "rdbs-adapter-mysql"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "futures-util",
  "mysql_async",
@@ -4791,7 +4791,7 @@ dependencies = [
 
 [[package]]
 name = "rdbs-adapter-oracle"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "oracle",
  "rdbs-core",
@@ -4801,7 +4801,7 @@ dependencies = [
 
 [[package]]
 name = "rdbs-adapter-postgres"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "futures-util",
  "rdbs-core",
@@ -4815,7 +4815,7 @@ dependencies = [
 
 [[package]]
 name = "rdbs-adapter-redis"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "rdbs-core",
  "redis",
@@ -4826,7 +4826,7 @@ dependencies = [
 
 [[package]]
 name = "rdbs-adapter-sqlite"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "rdbs-core",
  "rusqlite",
@@ -4836,7 +4836,7 @@ dependencies = [
 
 [[package]]
 name = "rdbs-core"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "futures-util",
  "serde",
@@ -4847,7 +4847,7 @@ dependencies = [
 
 [[package]]
 name = "rdbs-drivers"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "rdbs-adapter-mongodb",
  "rdbs-adapter-mssql",
@@ -4863,7 +4863,7 @@ dependencies = [
 
 [[package]]
 name = "rdbs-services"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "rdbs-adapter-mock",
  "rdbs-core",
@@ -4874,7 +4874,7 @@ dependencies = [
 
 [[package]]
 name = "rdbs-ssh"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "rdbs-core",
  "russh",
@@ -4884,7 +4884,7 @@ dependencies = [
 
 [[package]]
 name = "rdbs-storage"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "directories",
  "keyring",
@@ -4896,7 +4896,7 @@ dependencies = [
 
 [[package]]
 name = "rdbs-transfer"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "calamine",
  "chrono",
@@ -4916,7 +4916,7 @@ dependencies = [
 
 [[package]]
 name = "rdbs-ui"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "chrono",
  "directories",
@@ -7700,7 +7700,7 @@ dependencies = [
 
 [[package]]
 name = "zephix"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "eframe",
  "rdbs-adapter-mock",

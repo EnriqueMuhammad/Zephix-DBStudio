@@ -3,10 +3,16 @@
 All notable changes to Zephix. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project uses [Semantic Versioning](https://semver.org/).
 
-## Unreleased
+## 0.3.1 - 2026-10-30
 
 ### Added
 
+- Tables without a primary key can be edited in result grids and data tabs. Rows are found by
+  the values of all their columns (`NULL` included; large objects, XML, JSON and binary values
+  are left out of the match), and the edit bar shows "no primary key". Each change must still
+  affect exactly one row or the whole save is rolled back; of identical rows, one is changed.
+  The query must return every column of the table, otherwise the grid stays read-only and says
+  which column is missing.
 - **Messages** lists every statement in execution order, `(1 row affected)` after a data change
   and `(n rows affected)` after a query, then the completion time; a script without any shows
   "Commands completed successfully.". On SQL Server this includes batches that mix transaction
