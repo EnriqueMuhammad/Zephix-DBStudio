@@ -17,10 +17,12 @@ fake demo data.
 - **Query editor.** Syntax highlighting, autocomplete, run the script or only the selection,
   multiple result sets, stop a running query, query history, and explain / explain analyze.
   Scripts open from and save to `.sql` files; unsaved changes are asked about before a tab or
-  Zephix closes.
+  Zephix closes. Brackets and quotes close as you type, `begin` offers a transaction template,
+  and an Advanced menu has word wrap, view white space, case, line moves, sort, comment and
+  indent commands. Messages show the rows affected by each statement.
   MongoDB uses shell syntax. Redis uses redis-cli syntax.
-- **Results.** A grid for large result sets, edits applied in one transaction, and export to
-  CSV, JSON, or SQL INSERT.
+- **Results.** A grid for large result sets, edits applied in one transaction (also on tables
+  without a primary key), and export to CSV, JSON, or SQL INSERT.
 - **Explorer.** Every database on a server, a DDL viewer, and a table designer (columns, keys,
   indexes, foreign keys). Folders can be filtered by name and refreshed. Routines can be
   executed from the tree. SQL Server databases have Programmability and Security folders
@@ -59,12 +61,12 @@ Oracle connections need Oracle Instant Client (64-bit) on `PATH`.
 
 ## Install and download
 
-Current release: [v0.3.0](https://github.com/EnriqueMuhammad/Zephix-DBStudio/releases/tag/v0.3.0).
+Current release: [v0.3.1](https://github.com/EnriqueMuhammad/Zephix-DBStudio/releases/tag/v0.3.1).
 
 | Platform | What you get |
 | --- | --- |
-| Windows | `Zephix-0.3.0-x64.msi` (per-user, no administrator rights) or the portable `Zephix-0.3.0-x64.exe` |
-| macOS | `Zephix-0.3.0-arm64.pkg` (Apple silicon) |
+| Windows | `Zephix-0.3.1-x64.msi` (per-user, no administrator rights) or the portable `Zephix-0.3.1-x64.exe` |
+| macOS | `Zephix-0.3.1-arm64.pkg` (Apple silicon) |
 | Linux | Build from source (below). There is no Linux binary in the release. |
 
 Windows packaging notes are in [docs/RELEASING.md](docs/RELEASING.md). Checksums are in
@@ -134,6 +136,9 @@ text says Ctrl.
 | Ctrl+S / Ctrl+Shift+S | Save the query / save it under a new name |
 | Ctrl+Enter or Ctrl+R | Run the query, or the selection if there is one |
 | Ctrl+Space | Autocomplete |
+| Ctrl+K, Ctrl+C / Ctrl+K, Ctrl+U | Comment / uncomment the selected lines |
+| Ctrl+E, Ctrl+W | Toggle word wrap |
+| Alt+Up / Alt+Down | Move the selected lines |
 | Ctrl+W | Close tab |
 | Ctrl+Shift+W | Close all tabs |
 | Ctrl+B | Toggle the sidebar |
