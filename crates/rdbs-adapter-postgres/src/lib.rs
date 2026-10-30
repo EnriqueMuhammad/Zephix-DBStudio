@@ -20,7 +20,7 @@ use rdbs_core::sql;
 use rdbs_core::{
     AdapterFactory, BoxFuture, CancelHandle, Capabilities, CellValue, ColumnMeta,
     ConnectionProfile, DatabaseAdapter, DbError, DbErrorKind, DbObject, MAX_RESULT_ROWS,
-    QueryOutcome, ResultSet,
+    QueryOutcome, ResultSet, rows_affected_message,
 };
 use tokio::task::JoinHandle;
 use tokio_postgres::types::Type;
@@ -125,8 +125,8 @@ impl PostgresAdapter {
         futures_util::pin_mut!(stream);
 
         let mut outcome = QueryOutcome::default();
+        let statements = sql::split_statements(script);
         let mut statement_index = 0usize;
-        let mut statements_run = 0usize;
         let mut current: Option<RawSet> = None;
         let mut sets: Vec<RawSet> = Vec::new();
         self.take_notices();
@@ -155,28 +155,34 @@ impl PostgresAdapter {
                 }
                 SimpleQueryMessage::CommandComplete(count) => {
                     match current.take() {
-                        Some(set) => sets.push(set),
-                        None => outcome.rows_affected = Some(count),
+                        Some(set) => {
+                            // The server's count includes rows beyond the truncation limit.
+                            outcome.messages.push(rows_affected_message(count));
+                            sets.push(set);
+                        }
+                        None => {
+                            // BEGIN, CREATE, … complete with a count of zero that means
+                            // nothing; a statement the splitter did not see is reported.
+                            let counted = statements
+                                .get(statement_index)
+                                .is_none_or(|r| sql::reports_row_count(&script[r.clone()]));
+                            if counted {
+                                outcome.record_rows_affected(count);
+                            }
+                        }
                     }
                     statement_index += 1;
-                    statements_run += 1;
                 }
                 _ => {}
             }
         }
 
         outcome.messages.extend(self.take_notices());
-        if statements_run > 1 {
-            outcome
-                .messages
-                .push(format!("{statements_run} statements executed"));
-        }
         if outcome.truncated {
             outcome.messages.push(format!(
                 "Result truncated to the first {MAX_RESULT_ROWS} rows"
             ));
         }
-        let statements = sql::split_statements(script);
         for set in sets {
             let types = self.column_types(script, &statements, &set).await;
             outcome.results.push(set.into_result(types.as_deref()));

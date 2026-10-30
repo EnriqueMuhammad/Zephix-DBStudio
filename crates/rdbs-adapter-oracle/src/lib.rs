@@ -205,7 +205,7 @@ fn run_script(conn: &oracle::Connection, script: &str) -> Result<QueryOutcome, D
                     .map_err(map_error)?;
                 data.push(cells);
             }
-            outcome.results.push(ResultSet {
+            outcome.push_result(ResultSet {
                 columns: info
                     .iter()
                     .map(|(n, t)| ColumnMeta::new(n.clone(), type_name(t)))
@@ -218,7 +218,7 @@ fn run_script(conn: &oracle::Connection, script: &str) -> Result<QueryOutcome, D
             // Editor statements commit like an autocommit session.
             conn.commit().map_err(map_error)?;
             if stmt.is_dml() {
-                outcome.rows_affected = Some(n);
+                outcome.record_rows_affected(n);
             } else {
                 outcome.messages.push("Statement executed".into());
             }

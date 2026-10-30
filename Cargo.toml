@@ -18,6 +18,8 @@ members = [
     "crates/rdbs-adapter-mongodb",
     "crates/rdbs-adapter-oracle",
 ]
+# Patched dependencies, built as dependencies only (see vendor/README.md).
+exclude = ["vendor"]
 
 [workspace.package]
 version = "0.3.0"
@@ -111,3 +113,7 @@ expect_used = "warn"
 [profile.dev.package."*"]
 # Dependencies are optimised even in debug builds so the UI stays responsive.
 opt-level = 2
+
+# tiberius with per-statement row counts in query streams (ADR 0012, vendor/README.md).
+[patch.crates-io]
+tiberius = { path = "vendor/tiberius" }

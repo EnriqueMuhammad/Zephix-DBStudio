@@ -105,6 +105,46 @@ async fn batches_and_row_counts() {
 }
 
 #[tokio::test]
+async fn lists_row_counts_per_statement() {
+    let Some(mut s) = session().await else { return };
+    s.execute(
+        "CREATE TABLE #it_counts (id int PRIMARY KEY, name nvarchar(10));\n\
+         INSERT INTO #it_counts VALUES (1, N'a'), (2, N'b'), (3, N'c');",
+        CancelHandle::new(),
+    )
+    .await
+    .expect("setup");
+    // Transaction control produces no line; the open transaction survives the batch.
+    let out = s
+        .execute(
+            "BEGIN TRANSACTION\n\
+             UPDATE #it_counts SET name = N'z' WHERE id > 1\n\
+             SELECT * FROM #it_counts WHERE id = 3\n\
+             DELETE FROM #it_counts WHERE id = 99\n\
+             SELECT * FROM #it_counts",
+            CancelHandle::new(),
+        )
+        .await
+        .expect("transaction batch");
+    assert_eq!(
+        out.messages,
+        vec![
+            "(2 rows affected)",
+            "(1 row affected)",
+            "(0 rows affected)",
+            "(3 rows affected)",
+        ]
+    );
+    assert_eq!(out.results.len(), 2);
+    let out = s
+        .execute("SELECT @@TRANCOUNT AS n\nROLLBACK", CancelHandle::new())
+        .await
+        .expect("rollback");
+    assert_eq!(out.results[0].rows[0], vec![CellValue::Int(1)]);
+    assert_eq!(out.messages, vec!["(1 row affected)"]);
+}
+
+#[tokio::test]
 async fn returns_every_result_set() {
     let Some(mut s) = session().await else { return };
     let out = s
@@ -416,6 +456,25 @@ async fn apply_changes_is_transactional() {
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[0][1], CellValue::Text("z".into()));
     assert_eq!(rows[1][1], CellValue::Text("c".into()));
+}
+
+#[path = "../../rdbs-core/testkit/edit_without_key.rs"]
+mod without_key;
+
+#[tokio::test]
+async fn edits_table_without_primary_key() {
+    let Some(mut s) = session().await else { return };
+    s.execute(
+        "IF OBJECT_ID('dbo.it_nokey') IS NOT NULL DROP TABLE dbo.it_nokey; \
+         CREATE TABLE dbo.it_nokey (code varchar(20), starts datetime, note nvarchar(20)); \
+         INSERT INTO dbo.it_nokey VALUES ('a', '2026-10-29T07:00:00.997', NULL), \
+             ('a', '2026-10-29T07:00:00.997', NULL), ('b', '2026-10-29T15:00:00', N'x');",
+        CancelHandle::new(),
+    )
+    .await
+    .expect("setup");
+    without_key::edit_without_key(s.as_mut(), DatabaseKind::SqlServer, Some("dbo"), "it_nokey")
+        .await;
 }
 
 #[path = "../../rdbs-core/testkit/schema_roundtrip.rs"]

@@ -580,7 +580,7 @@ pub struct QueryTab {
     /// Database to run in instead of the profile's default (PostgreSQL / SQL Server).
     #[serde(default)]
     pub database: Option<String>,
-    /// Table the tab was opened from; enables editing when it has a primary key.
+    /// Table the tab was opened from; enables editing its rows.
     #[serde(default)]
     pub table: Option<rdbs_core::edit::TableTarget>,
     /// Set for a data tab: the rows of one table or view, without an SQL editor.
@@ -711,6 +711,8 @@ pub struct RunState {
     pub plan: Option<Result<rdbs_core::plan::ExplainPlan, DbError>>,
     /// Plan viewer state.
     pub plan_view: crate::plan::PlanViewState,
+    /// Database whose objects this tab asked to load for completion (asked once).
+    pub catalog_requested: Option<String>,
 }
 
 /// What the results area of a query tab shows.
@@ -758,6 +760,8 @@ pub struct LastRun {
     pub outcome: Result<QueryOutcome, DbError>,
     /// Connection name, for the status line.
     pub profile_name: String,
+    /// When the execution finished, for the Messages view.
+    pub finished: chrono::DateTime<chrono::Local>,
 }
 
 /// Borrowed application state handed to the tab viewer for one frame.

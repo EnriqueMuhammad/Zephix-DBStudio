@@ -96,6 +96,8 @@ impl Catalog {
 /// Category of a suggestion (drives the icon and ranking).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ItemKind {
+    /// Multi-line template, such as a transaction block.
+    Snippet,
     /// Column of a referenced table.
     Column,
     /// Table.
@@ -119,6 +121,8 @@ pub struct Item {
     pub detail: Option<String>,
     /// Text inserted in place of the typed prefix (quoted when necessary).
     pub insert: String,
+    /// Byte offset in `insert` where the caret goes; `None` puts it after the insertion.
+    pub caret: Option<usize>,
 }
 
 /// Suggestions for a cursor position.
@@ -245,6 +249,45 @@ enum Context {
     General,
 }
 
+/// Transaction block template offered for `begin`: the work goes on the empty line, and the
+/// script ends in a rollback until the commit is uncommented. Statements are separated by `;`
+/// except on SQL Server, where a batch needs none.
+fn transaction_template(kind: DatabaseKind, lower: bool) -> Option<Item> {
+    let (begin, end) = match kind {
+        DatabaseKind::SqlServer => ("BEGIN TRANSACTION", ""),
+        DatabaseKind::PostgreSql | DatabaseKind::Sqlite => ("BEGIN TRANSACTION", ";"),
+        DatabaseKind::MySql | DatabaseKind::MariaDb => ("START TRANSACTION", ";"),
+        DatabaseKind::Oracle | DatabaseKind::MongoDb | DatabaseKind::Redis => return None,
+    };
+    let case = |s: &str| {
+        if lower {
+            s.to_lowercase()
+        } else {
+            s.to_owned()
+        }
+    };
+    let head = format!(
+        "{}{end}
+--Query
+",
+        case(begin)
+    );
+    let insert = format!(
+        "{head}
+--{}{end}
+{}{end}",
+        case("COMMIT"),
+        case("ROLLBACK")
+    );
+    Some(Item {
+        label: case("BEGIN TRANSACTION"),
+        kind: ItemKind::Snippet,
+        detail: Some("template".to_owned()),
+        caret: Some(head.len()),
+        insert,
+    })
+}
+
 /// Suggestions at byte offset `cursor`. `forced` (Ctrl+Space) also completes an empty prefix.
 pub fn complete(
     sql_text: &str,
@@ -307,6 +350,7 @@ pub fn complete(
                 kind: ItemKind::Column,
                 detail: Some(table.name.clone()),
                 insert: ident(c, kind),
+                caret: None,
             })
             .collect()
     };
@@ -319,6 +363,7 @@ pub fn complete(
         },
         detail: t.schema.clone(),
         insert: ident(&t.name, kind),
+        caret: None,
     };
 
     if let Some(q) = &qualifier {
@@ -371,6 +416,7 @@ pub fn complete(
                 kind: ItemKind::Schema,
                 detail: None,
                 insert: ident(s, kind),
+                caret: None,
             }));
         }
         let lower = prefix.chars().next().is_some_and(char::is_lowercase);
@@ -383,7 +429,9 @@ pub fn complete(
             } else {
                 (*k).to_owned()
             },
+            caret: None,
         }));
+        items.extend(transaction_template(kind, lower));
     }
 
     let needle = prefix.to_lowercase();
@@ -398,6 +446,10 @@ pub fn complete(
             } else {
                 return None;
             };
+            // Templates need a few letters, so short prefixes still rank keywords first.
+            if item.kind == ItemKind::Snippet && needle.chars().count() < 3 {
+                return None;
+            }
             // Hide a keyword that is already fully typed.
             if item.kind == ItemKind::Keyword && label == needle {
                 return None;
@@ -545,5 +597,40 @@ mod tests {
         assert!(labels("SELECT 12|").is_empty());
         let forced = complete("SELECT ", 7, &catalog(), DatabaseKind::PostgreSql, true);
         assert!(forced.is_some());
+    }
+
+    #[test]
+    fn offers_transaction_template_for_begin() {
+        let c = complete("beg", 3, &catalog(), DatabaseKind::SqlServer, false).unwrap();
+        let item = &c.items[0];
+        assert_eq!(item.kind, ItemKind::Snippet);
+        assert_eq!(
+            item.insert,
+            "begin transaction
+--Query
+
+--commit
+rollback"
+        );
+        assert_eq!(
+            &item.insert[item.caret.unwrap()..],
+            "
+--commit
+rollback"
+        );
+        let c = complete("BEGIN", 5, &catalog(), DatabaseKind::PostgreSql, false).unwrap();
+        assert_eq!(
+            c.items[0].insert,
+            "BEGIN TRANSACTION;
+--Query
+
+--COMMIT;
+ROLLBACK;"
+        );
+        // Not for a short prefix, nor where the engine has no such statement.
+        let c = complete("b", 1, &catalog(), DatabaseKind::SqlServer, false).unwrap();
+        assert!(c.items.iter().all(|i| i.kind != ItemKind::Snippet));
+        let c = complete("begin", 5, &catalog(), DatabaseKind::Oracle, false);
+        assert!(c.is_none_or(|c| c.items.iter().all(|i| i.kind != ItemKind::Snippet)));
     }
 }

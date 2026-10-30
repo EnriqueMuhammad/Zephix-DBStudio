@@ -1,7 +1,7 @@
 //! Virtualised result grid built on `egui_extras::TableBuilder`.
 //!
 //! Only visible rows are laid out each frame, so result sets with hundreds of thousands of
-//! rows scroll smoothly. In edit mode (a table with a primary key) cells can be changed
+//! rows scroll smoothly. In edit mode (a table opened from the explorer) cells can be changed
 //! inline, rows added or marked for deletion; changes stay pending until saved.
 
 use egui::{Align, Color32, Event, Key, Layout, RichText, Sense, Ui};

@@ -13,6 +13,9 @@ use rdbs_core::{
 #[path = "../../rdbs-core/testkit/schema_roundtrip.rs"]
 mod roundtrip;
 
+#[path = "../../rdbs-core/testkit/edit_without_key.rs"]
+mod without_key;
+
 /// A fresh, empty database file in the temp directory.
 fn fresh_file(name: &str) -> PathBuf {
     let path = std::env::temp_dir().join(format!("rdbs-it-{name}-{}.sqlite", std::process::id()));
@@ -52,6 +55,21 @@ async fn describe_create_alter_round_trip() {
         },
     )
     .await;
+}
+
+#[tokio::test]
+async fn edits_table_without_primary_key() {
+    let path = fresh_file("nokey");
+    let mut s = open(&path).await;
+    s.execute(
+        "CREATE TABLE it_nokey (code TEXT, starts DATETIME, note TEXT); \
+         INSERT INTO it_nokey VALUES ('a', '2026-10-29 07:00:00.123', NULL), \
+             ('a', '2026-10-29 07:00:00.123', NULL), ('b', '2026-10-29 15:00:00', 'x')",
+        CancelHandle::new(),
+    )
+    .await
+    .expect("setup");
+    without_key::edit_without_key(s.as_mut(), DatabaseKind::Sqlite, None, "it_nokey").await;
 }
 
 #[tokio::test]

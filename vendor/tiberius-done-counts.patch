@@ -1,0 +1,72 @@
+--- a/src/tds/codec/token/token_done.rs	2006-07-24 08:21:28.000000000 +0700
++++ b/src/tds/codec/token/token_done.rs	2026-10-29 11:30:38.225803700 +0700
+@@ -71,6 +71,13 @@
+         self.status.contains(DoneStatus::Attention)
+     }
+ 
++    /// Zephix patch: the row count when the server reported one (`DONE_COUNT` set).
++    pub(crate) fn count(&self) -> Option<u64> {
++        self.status
++            .contains(DoneStatus::Count)
++            .then_some(self.done_rows)
++    }
++
+     pub(crate) fn rows(&self) -> u64 {
+         // The row count is only meaningful when the DONE_COUNT status bit is
+         // set (MS-TDS §2.2.7.6); otherwise the field is not a valid count.
+--- a/src/tds/stream/query.rs	2006-07-24 08:21:28.000000000 +0700
++++ b/src/tds/stream/query.rs	2026-10-29 11:30:38.225803700 +0700
+@@ -92,6 +92,8 @@
+     token_stream: Peekable<BoxStream<'a, crate::Result<ReceivedToken>>>,
+     columns: Option<Arc<Vec<Column>>>,
+     result_set_index: Option<usize>,
++    // Zephix patch: row counts of completed statements, see `take_done_counts`.
++    done_counts: Vec<u64>,
+ }
+ 
+ impl<'a> Debug for QueryStream<'a> {
+@@ -111,6 +113,21 @@
+             token_stream: token_stream.peekable(),
+             columns: None,
+             result_set_index: None,
++            done_counts: Vec::new(),
++        }
++    }
++
++    /// Zephix patch: row counts reported by the statements that completed since the last
++    /// call, in order. Only statements that report a count (`DONE_COUNT`) are included:
++    /// queries, data modification, and those inside procedures (`DONEINPROC`). A count
++    /// taken while a result set is open belongs to that result set.
++    pub fn take_done_counts(&mut self) -> Vec<u64> {
++        std::mem::take(&mut self.done_counts)
++    }
++
++    fn note_done(&mut self, token: &ReceivedToken) {
++        if let ReceivedToken::Done(done) | ReceivedToken::DoneInProc(done) = token {
++            self.done_counts.extend(done.count());
+         }
+     }
+ 
+@@ -127,7 +144,9 @@
+             match item {
+                 Some(ReceivedToken::NewResultset(_)) => break,
+                 Some(_) => {
+-                    self.token_stream.try_next().await?;
++                    if let Some(token) = self.token_stream.try_next().await? {
++                        self.note_done(&token);
++                    }
+                 }
+                 None => break,
+             }
+@@ -423,7 +442,10 @@
+ 
+                     Poll::Ready(Some(Ok(QueryItem::Row(row))))
+                 }
+-                _ => continue,
++                other => {
++                    this.note_done(&other);
++                    continue;
++                }
+             };
+         }
+     }

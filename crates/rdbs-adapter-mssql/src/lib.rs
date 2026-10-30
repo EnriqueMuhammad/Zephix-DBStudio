@@ -1,8 +1,8 @@
 //! Microsoft SQL Server adapter built on `tiberius` (ADR 0004).
 //!
-//! Scripts are split into batches on `GO` lines. A batch that is a single plain DML
-//! statement runs through `sp_executesql` so the affected row count can be reported; every
-//! other batch runs as a plain SQL batch and its result sets are read from the TDS stream.
+//! Scripts are split into batches on `GO` lines. Each batch runs as a plain SQL batch; its
+//! result sets and the row count of every statement (the DONE tokens, exposed by the
+//! vendored tiberius patch, ADR 0012) are read from the TDS stream.
 //!
 //! TDS has an "attention" signal, but tiberius does not expose it. Cancelling therefore drops
 //! the connection, which makes the server abort the request; the next execution reconnects
@@ -26,7 +26,7 @@ use rdbs_core::edit::Change;
 use rdbs_core::{
     AdapterFactory, BoxFuture, CancelHandle, Capabilities, ColumnMeta, ConnectionProfile,
     DatabaseAdapter, DbError, DbErrorKind, DbObject, MAX_RESULT_ROWS, QueryOutcome, ResultSet,
-    SslMode,
+    SslMode, rows_affected_message,
 };
 use tiberius::{AuthMethod, Client, Config, EncryptionLevel, QueryItem};
 use tokio::net::TcpStream;
@@ -167,14 +167,22 @@ impl MssqlAdapter {
         let client = self.client().await?;
         let mut outcome = QueryOutcome::default();
         for b in &batches {
-            if batch::is_plain_dml(b) {
-                let result = client.execute(*b, &[]).await.map_err(map_error)?;
-                outcome.rows_affected = Some(result.total());
-                continue;
-            }
             let mut stream = client.simple_query(*b).await.map_err(map_error)?;
             let mut current: Option<ResultSet> = None;
-            while let Some(item) = stream.try_next().await.map_err(map_error)? {
+            loop {
+                let item = stream.try_next().await.map_err(map_error)?;
+                // Statements completed before this item, in order (the vendored tiberius
+                // patch). A count taken while a result set is open is that set's row count.
+                for count in stream.take_done_counts() {
+                    match current.take() {
+                        Some(set) => {
+                            outcome.messages.push(rows_affected_message(count));
+                            outcome.results.push(set);
+                        }
+                        None => outcome.record_rows_affected(count),
+                    }
+                }
+                let Some(item) = item else { break };
                 match item {
                     QueryItem::Metadata(meta) => {
                         if let Some(done) = current.take() {
@@ -204,13 +212,8 @@ impl MssqlAdapter {
                 }
             }
             if let Some(done) = current {
-                outcome.results.push(done);
+                outcome.push_result(done);
             }
-        }
-        if batches.len() > 1 {
-            outcome
-                .messages
-                .push(format!("{} batches executed", batches.len()));
         }
         if outcome.truncated {
             outcome.messages.push(format!(

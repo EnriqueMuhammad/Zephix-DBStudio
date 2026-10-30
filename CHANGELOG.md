@@ -3,6 +3,37 @@
 All notable changes to Zephix. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project uses [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Added
+
+- **Messages** lists every statement in execution order, `(1 row affected)` after a data change
+  and `(n rows affected)` after a query, then the completion time; a script without any shows
+  "Commands completed successfully.". On SQL Server this includes batches that mix transaction
+  control, data changes and queries.
+- The SQL editor closes `(`, `[`, `'` and `"` as they are typed, wraps a selection in them,
+  steps over a closer that is already there and removes an empty pair with Backspace.
+- Typing `begin` offers a transaction template (`begin transaction`, a `--Query` line, a
+  commented `--commit` and `rollback`), with the caret on the line for the work.
+- An **Advanced** submenu in the editor's right-click menu: Tabify / Untabify Selected Lines,
+  Make Uppercase (Ctrl+Shift+U) / Lowercase (Ctrl+Shift+L), Move Selected Lines Up / Down
+  (Alt+Up / Alt+Down), Delete Horizontal White Space (Ctrl+K, Ctrl+\\), View White Space
+  (Ctrl+E, Ctrl+S), **Word Wrap** (Ctrl+E, Ctrl+W), Sort Lines, Join Lines, Next / Previous
+  Subword (Ctrl+Alt+Right / Left), Expand Selection to Line (Shift+Alt+E) and Increase /
+  Decrease Line Indent (Tab / Shift+Tab). Comment and Uncomment Selection (Ctrl+K, Ctrl+C /
+  Ctrl+K, Ctrl+U) sit in the menu itself. Word wrap and white space are remembered.
+
+### Changed
+
+- Autocomplete suggestions are left-aligned, with the schema or table and the kind of item in
+  a right column behind a divider.
+
+### Fixed
+
+- Table names were sometimes missing from autocomplete (also with Ctrl+Space) when the tab
+  ran in a database that had not been expanded in the explorer yet; its objects now load when
+  the editor gets focus, and only that database's tables are suggested.
+
 ## 0.3.0 - 2026-10-27
 
 ### Added

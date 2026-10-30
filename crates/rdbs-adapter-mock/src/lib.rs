@@ -345,10 +345,9 @@ impl DatabaseAdapter for MockAdapter {
                 }),
                 StatementKind::Read => {
                     if lower.contains("sysjobhistory") {
-                        return Ok(QueryOutcome {
-                            results: vec![data::sample_job_history()],
-                            ..QueryOutcome::default()
-                        });
+                        let mut outcome = QueryOutcome::default();
+                        outcome.push_result(data::sample_job_history());
+                        return Ok(outcome);
                     }
                     // Paged reads (`OFFSET n`) see a table of DEFAULT_ROWS rows.
                     let limit = requested_rows(sql_text)
@@ -367,15 +366,15 @@ impl DatabaseAdapter for MockAdapter {
                     if cancel.is_cancelled() {
                         return Err(DbError::cancelled());
                     }
-                    Ok(QueryOutcome {
-                        results: vec![result],
-                        ..QueryOutcome::default()
-                    })
+                    let mut outcome = QueryOutcome::default();
+                    outcome.push_result(result);
+                    Ok(outcome)
                 }
-                StatementKind::Write => Ok(QueryOutcome {
-                    rows_affected: Some(3),
-                    ..QueryOutcome::default()
-                }),
+                StatementKind::Write => {
+                    let mut outcome = QueryOutcome::default();
+                    outcome.record_rows_affected(3);
+                    Ok(outcome)
+                }
                 StatementKind::Ddl | StatementKind::Transaction | StatementKind::Other => {
                     Ok(QueryOutcome {
                         messages: vec!["Command completed successfully (mock)".to_owned()],

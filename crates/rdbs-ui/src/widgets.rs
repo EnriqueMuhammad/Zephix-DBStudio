@@ -151,6 +151,36 @@ pub fn highlight_sql(text: &str, font: &FontId) -> LayoutJob {
     job
 }
 
+/// [`highlight_sql`] with spaces drawn as `·` and tabs as `»` in a faint color. Each stays one
+/// character, so cursor positions do not change.
+pub fn highlight_sql_whitespace(text: &str, font: &FontId) -> LayoutJob {
+    let mut job = LayoutJob::default();
+    let blank = TextFormat::simple(font.clone(), color::text_faint().gamma_multiply(0.6));
+    for token in sql::tokenize(text) {
+        let mut format = TextFormat::simple(font.clone(), theme::token_color(token.kind));
+        format.italics = token.kind == TokenKind::Comment;
+        let mut run = String::new();
+        let mut run_blank = false;
+        for c in text[token.range].chars() {
+            let is_blank = c == ' ' || c == '\t';
+            if is_blank != run_blank && !run.is_empty() {
+                let f = if run_blank { &blank } else { &format };
+                job.append(&std::mem::take(&mut run), 0.0, f.clone());
+            }
+            run_blank = is_blank;
+            run.push(match c {
+                ' ' => '·',
+                '\t' => '»',
+                c => c,
+            });
+        }
+        if !run.is_empty() {
+            job.append(&run, 0.0, if run_blank { blank.clone() } else { format });
+        }
+    }
+    job
+}
+
 /// Converts a char-index range (as reported by `TextEdit`) into a byte range of `text`.
 pub fn char_range_to_bytes(text: &str, start: usize, end: usize) -> std::ops::Range<usize> {
     let byte_at = |char_idx: usize| {

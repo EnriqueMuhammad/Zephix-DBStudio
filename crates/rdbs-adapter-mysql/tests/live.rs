@@ -293,6 +293,24 @@ async fn apply_changes_is_transactional() {
     assert_eq!(rows[1][1], CellValue::Text("c".into()));
 }
 
+#[path = "../../rdbs-core/testkit/edit_without_key.rs"]
+mod without_key;
+
+#[tokio::test]
+async fn edits_table_without_primary_key() {
+    let Some(mut s) = session().await else { return };
+    s.execute(
+        "DROP TABLE IF EXISTS it_nokey; \
+         CREATE TABLE it_nokey (code VARCHAR(20), starts DATETIME(3), note VARCHAR(20)); \
+         INSERT INTO it_nokey VALUES ('a', '2026-10-29 07:00:00.123', NULL), \
+             ('a', '2026-10-29 07:00:00.123', NULL), ('b', '2026-10-29 15:00:00', 'x')",
+        CancelHandle::new(),
+    )
+    .await
+    .expect("setup");
+    without_key::edit_without_key(s.as_mut(), DatabaseKind::MySql, None, "it_nokey").await;
+}
+
 #[path = "../../rdbs-core/testkit/schema_roundtrip.rs"]
 mod roundtrip;
 

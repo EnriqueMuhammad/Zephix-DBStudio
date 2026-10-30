@@ -35,6 +35,30 @@ impl QueryOutcome {
     pub fn total_rows(&self) -> usize {
         self.results.iter().map(|r| r.rows.len()).sum()
     }
+
+    /// Records the row count of a data-modifying statement: it becomes
+    /// [`Self::rows_affected`] and a "(n rows affected)" line in [`Self::messages`], so the
+    /// messages list every statement in execution order.
+    pub fn record_rows_affected(&mut self, n: u64) {
+        self.rows_affected = Some(n);
+        self.messages.push(rows_affected_message(n));
+    }
+
+    /// Adds a result set together with its "(n rows affected)" line.
+    pub fn push_result(&mut self, result: ResultSet) {
+        self.messages
+            .push(rows_affected_message(result.rows.len() as u64));
+        self.results.push(result);
+    }
+}
+
+/// Row count line in the style of database consoles: "(1 row affected)", "(3 rows affected)".
+pub fn rows_affected_message(n: u64) -> String {
+    if n == 1 {
+        "(1 row affected)".to_owned()
+    } else {
+        format!("({n} rows affected)")
+    }
 }
 
 /// Commands sent from the UI to the worker.

@@ -614,6 +614,7 @@ impl StudioApp {
                         elapsed,
                         outcome: result,
                         profile_name,
+                        finished: chrono::Local::now(),
                     };
                     q.run.grid = GridState::default();
                     q.run.stacked_grids.clear();
@@ -789,6 +790,9 @@ impl StudioApp {
             || self.scripts.quit_prompt
         {
             return; // Modals own the keyboard.
+        }
+        if crate::editor::chord_pending(ctx) {
+            return; // The second key of an editor shortcut such as Ctrl+E, Ctrl+W.
         }
         let pressed = |sc: &KeyboardShortcut| ctx.input_mut(|i| i.consume_shortcut(sc));
         let new_connection = pressed(&SC_NEW_CONNECTION);
@@ -1384,8 +1388,8 @@ impl StudioApp {
         });
     }
 
-    /// Edit target for a table opened from the explorer, with its primary key read from the
-    /// object tree (columns marked "PK"). Views are not editable.
+    /// Edit target for a table opened from the explorer, with its columns and primary key read
+    /// from the object tree (columns marked "PK"). Views are not editable.
     fn table_target(
         &self,
         obj: &crate::model::ObjectRef,
@@ -1401,13 +1405,14 @@ impl StudioApp {
             obj.schema.as_deref(),
             &obj.name,
         )?;
-        let primary_key = node
+        let columns: Vec<&rdbs_core::DbObject> = node
             .children
             .iter()
-            .filter(|c| {
-                c.kind == rdbs_core::ObjectKind::Column
-                    && c.detail.as_deref().is_some_and(|d| d.contains("· PK"))
-            })
+            .filter(|c| c.kind == rdbs_core::ObjectKind::Column)
+            .collect();
+        let primary_key = columns
+            .iter()
+            .filter(|c| c.detail.as_deref().is_some_and(|d| d.contains("· PK")))
             .map(|c| c.name.clone())
             .collect();
         Some(rdbs_core::edit::TableTarget {
@@ -1416,6 +1421,7 @@ impl StudioApp {
             schema: obj.schema.clone(),
             table: obj.name.clone(),
             primary_key,
+            columns: columns.iter().map(|c| c.name.clone()).collect(),
         })
     }
 

@@ -209,8 +209,15 @@ fn run_script(conn: &Connection, sql: &str) -> Result<QueryOutcome, DbError> {
     let mut batch = Batch::new(conn, sql);
     while let Some(mut stmt) = batch.next().map_err(map_error)? {
         if stmt.column_count() == 0 {
+            // SQLite keeps the count of the last data change, so other statements would
+            // repeat it.
+            let counted = stmt
+                .expanded_sql()
+                .is_none_or(|text| rdbs_core::sql::reports_row_count(&text));
             let n = stmt.raw_execute().map_err(map_error)?;
-            outcome.rows_affected = Some(n as u64);
+            if counted {
+                outcome.record_rows_affected(n as u64);
+            }
             continue;
         }
         let mut columns: Vec<ColumnMeta> = stmt
@@ -242,7 +249,7 @@ fn run_script(conn: &Connection, sql: &str) -> Result<QueryOutcome, DbError> {
                     .to_owned();
             }
         }
-        outcome.results.push(ResultSet { columns, rows });
+        outcome.push_result(ResultSet { columns, rows });
     }
     Ok(outcome)
 }
