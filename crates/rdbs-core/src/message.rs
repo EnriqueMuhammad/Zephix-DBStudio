@@ -361,7 +361,12 @@ pub enum Event {
         /// Reason.
         error: DbError,
     },
-    /// A query has been dispatched to the server.
+    /// A query is waiting for its session. The statement has not been sent yet.
+    QueryConnecting {
+        /// Correlation id.
+        request_id: RequestId,
+    },
+    /// The session is open and the statement is executing.
     QueryStarted {
         /// Correlation id.
         request_id: RequestId,
