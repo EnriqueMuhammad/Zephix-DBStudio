@@ -114,6 +114,17 @@ expect_used = "warn"
 # Dependencies are optimised even in debug builds so the UI stays responsive.
 opt-level = 2
 
+# GitHub Actions uses this profile. It inherits dev (debug assertions, no LTO) but
+# compiles dependencies at opt-level 0 so a clean CI build is not stuck optimising
+# every crate. Local `cargo build` / `cargo test` keep the dev profile above.
+[profile.ci]
+inherits = "dev"
+incremental = false
+debug = false
+
+[profile.ci.package."*"]
+opt-level = 0
+
 # tiberius with per-statement row counts in query streams (ADR 0012, vendor/README.md).
 [patch.crates-io]
 tiberius = { path = "vendor/tiberius" }
