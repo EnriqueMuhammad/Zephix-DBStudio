@@ -24,7 +24,9 @@ fake demo data.
   white space, case, line moves, sort, comment and indent commands. A **Reconnect** button on
   the query tab opens a fresh session when the server has dropped the connection; the tab and
   its text stay. Each query tab's title has a dot for that session (green, amber when it
-  needs reconnect, grey when it is not connected). Idle sessions are checked in the
+  needs reconnect, grey when it is not connected or still connecting). While a session is
+  opening, the tab and its status line say Connecting…, then Running… once the statement
+  executes. Idle sessions are checked in the
   background so the dot changes without running a query. Messages show the rows affected by each statement.
   MongoDB uses shell syntax. Redis uses redis-cli syntax.
 - **Results.** A grid for large result sets, edits applied in one transaction (also on tables
