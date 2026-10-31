@@ -837,7 +837,6 @@ impl Worker {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .insert(request_id, cancel.clone());
-        self.emitter.emit(Event::QueryStarted { request_id });
         let started = Instant::now();
 
         let result = async {
@@ -846,8 +845,17 @@ impl Worker {
             if cancel.is_cancelled() {
                 return Err(DbError::cancelled());
             }
+            // The statement has not started. Tell the UI before the connect, which can take
+            // long enough to look like the query is already executing.
+            if session.is_none() {
+                self.emitter.emit(Event::QueryConnecting { request_id });
+            }
             self.ensure_connected(&effective, password, &mut session, main_session)
                 .await?;
+            if cancel.is_cancelled() {
+                return Err(DbError::cancelled());
+            }
+            self.emitter.emit(Event::QueryStarted { request_id });
             let result = match session.as_mut() {
                 Some(adapter) => adapter.execute(&sql, cancel.clone()).await,
                 None => Err(DbError::new(DbErrorKind::Internal, "session unavailable")),
@@ -1318,6 +1326,196 @@ mod tests {
             .and_then(|jobs| jobs.children.iter().find(|job| job.name == name))
             .and_then(|job| job.detail.clone())
             .unwrap_or_default()
+    }
+
+    #[test]
+    fn statement_starts_only_after_the_session_is_open() {
+        let h = ServiceHandle::spawn(
+            Arc::new(MockAdapterFactory::new()),
+            Arc::new(MemoryCredentials::default()),
+            || {},
+        )
+        .unwrap();
+        let id = h.next_request_id();
+        h.send(Command::Execute {
+            request_id: id,
+            profile: profile(),
+            sql: "select 1".into(),
+            password: None,
+            database: None,
+        });
+        let mut saw_query_connecting = false;
+        let mut saw_connected = false;
+        let mut saw_started = false;
+        let deadline = Instant::now() + WAIT;
+        while let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
+            match h.recv_timeout(remaining) {
+                Some(Event::QueryConnecting { request_id }) => {
+                    assert_eq!(request_id, id);
+                    assert!(
+                        !saw_started,
+                        "QueryStarted before the session was requested"
+                    );
+                    saw_query_connecting = true;
+                }
+                Some(Event::Connected { .. }) => {
+                    assert!(saw_query_connecting, "connected without a connecting phase");
+                    assert!(
+                        !saw_started,
+                        "QueryStarted before the session was established"
+                    );
+                    saw_connected = true;
+                }
+                Some(Event::QueryStarted { request_id }) => {
+                    assert_eq!(request_id, id);
+                    assert!(
+                        saw_connected,
+                        "statement started before the session existed"
+                    );
+                    saw_started = true;
+                }
+                Some(Event::QueryFinished {
+                    request_id, result, ..
+                }) => {
+                    assert_eq!(request_id, id);
+                    assert!(result.is_ok(), "{result:?}");
+                    assert!(saw_started, "finished without QueryStarted");
+                    return;
+                }
+                Some(_) => {}
+                None => break,
+            }
+        }
+        panic!(
+            "timed out (connecting={saw_query_connecting}, connected={saw_connected}, started={saw_started})"
+        );
+    }
+
+    #[test]
+    fn failed_connect_never_reports_the_statement_as_started() {
+        let h = handle();
+        let mut p = profile();
+        p.host = "fail.invalid".into();
+        let id = h.next_request_id();
+        h.send(Command::Execute {
+            request_id: id,
+            profile: p,
+            sql: "select 1".into(),
+            password: None,
+            database: None,
+        });
+        let mut saw_connecting = false;
+        let deadline = Instant::now() + WAIT;
+        while let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
+            match h.recv_timeout(remaining) {
+                Some(Event::QueryConnecting { request_id }) => {
+                    assert_eq!(request_id, id);
+                    saw_connecting = true;
+                }
+                Some(Event::QueryStarted { .. }) => {
+                    panic!("QueryStarted although the session never opened");
+                }
+                Some(Event::QueryFinished {
+                    request_id, result, ..
+                }) => {
+                    assert_eq!(request_id, id);
+                    assert!(saw_connecting, "missing connecting phase");
+                    assert!(result.is_err());
+                    return;
+                }
+                Some(_) => {}
+                None => break,
+            }
+        }
+        panic!("timed out waiting for the failed connection");
+    }
+
+    #[test]
+    fn open_session_runs_without_a_connecting_phase() {
+        let h = handle();
+        let p = profile();
+        h.send(Command::Connect {
+            profile: p.clone(),
+            password: None,
+        });
+        wait_for(&h, |e| matches!(e, Event::ObjectsLoaded { .. }));
+        let id = h.next_request_id();
+        h.send(Command::Execute {
+            request_id: id,
+            profile: p,
+            sql: "select 1".into(),
+            password: None,
+            database: None,
+        });
+        let mut saw_connecting = false;
+        let mut saw_started = false;
+        let deadline = Instant::now() + WAIT;
+        while let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
+            match h.recv_timeout(remaining) {
+                Some(Event::QueryConnecting { .. }) => saw_connecting = true,
+                Some(Event::QueryStarted { request_id }) => {
+                    assert_eq!(request_id, id);
+                    saw_started = true;
+                }
+                Some(Event::QueryFinished { request_id, .. }) if request_id == id => {
+                    assert!(saw_started, "missing QueryStarted");
+                    assert!(
+                        !saw_connecting,
+                        "an open session should not report Connecting"
+                    );
+                    return;
+                }
+                Some(_) => {}
+                None => break,
+            }
+        }
+        panic!("timed out waiting for the query on an open session");
+    }
+
+    #[test]
+    fn other_database_connects_before_the_statement_starts() {
+        let h = handle();
+        let mut p = profile();
+        p.database = "app".into();
+        let id = h.next_request_id();
+        h.send(Command::Execute {
+            request_id: id,
+            profile: p,
+            sql: "select 1".into(),
+            password: None,
+            database: Some("analytics".into()),
+        });
+        let mut saw_connecting = false;
+        let mut saw_started = false;
+        let deadline = Instant::now() + WAIT;
+        while let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
+            match h.recv_timeout(remaining) {
+                Some(Event::QueryConnecting { request_id }) => {
+                    assert_eq!(request_id, id);
+                    assert!(!saw_started);
+                    saw_connecting = true;
+                }
+                Some(Event::Connected { .. }) => {
+                    panic!("a non-default database must not announce the main session");
+                }
+                Some(Event::QueryStarted { request_id }) => {
+                    assert_eq!(request_id, id);
+                    assert!(saw_connecting, "statement started before connecting");
+                    saw_started = true;
+                }
+                Some(Event::QueryFinished {
+                    request_id, result, ..
+                }) => {
+                    assert_eq!(request_id, id);
+                    assert!(result.is_ok(), "{result:?}");
+                    assert!(saw_started);
+                    return;
+                }
+                Some(_) => {}
+                None => break,
+            }
+        }
+        panic!("timed out waiting for the other database");
     }
 
     #[test]

@@ -19,6 +19,10 @@ and the project uses [Semantic Versioning](https://semver.org/).
   open, amber when it was dropped or the last connect failed, grey when it is not connected
   yet or still connecting. The tooltip names the connection and the state. Clicking the dot,
   or **Reconnect** in the tab's right-click menu, opens a new session.
+- Running a query that still needs a session shows **Connecting…** on the query tab and
+  its status line, and the tab dot stays grey, until the session is open. It switches to
+  **Running…** when the statement actually starts. A query on a session that is already
+  open stays on **Running…**.
 - Idle sessions are pinged about every 45 seconds, off the UI thread, and skipped while a
   statement is running. A failed ping marks the session dropped (the tab dot turns amber)
   without waiting for the next query. The ping also keeps a quiet networked connection from
