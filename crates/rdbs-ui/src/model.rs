@@ -52,9 +52,12 @@ impl ConnState {
     }
 
     /// How a query tab should paint this session. Amber means reconnect; grey means there is
-    /// no live session yet (disconnected or still connecting).
+    /// no live session yet (disconnected or still connecting). Connecting wins over a dropped
+    /// session so the dot stays grey for the whole attempt.
     pub fn link(&self, database: &Option<String>) -> TabLink {
-        if self.session_dropped(database) || matches!(self.status, ConnStatus::Failed(_)) {
+        if matches!(self.status, ConnStatus::Connecting) {
+            TabLink::Off
+        } else if self.session_dropped(database) || matches!(self.status, ConnStatus::Failed(_)) {
             TabLink::Down
         } else if matches!(self.status, ConnStatus::Connected { .. }) {
             TabLink::Up
@@ -65,7 +68,9 @@ impl ConnState {
 
     /// Short label for [`Self::link`], including the connecting and failed cases.
     pub fn link_label(&self, database: &Option<String>) -> &'static str {
-        if self.session_dropped(database) {
+        if matches!(self.status, ConnStatus::Connecting) {
+            "Connecting…"
+        } else if self.session_dropped(database) {
             "Session dropped"
         } else {
             match &self.status {
@@ -380,6 +385,11 @@ mod tests {
         assert_eq!(conn.link(&None), TabLink::Down);
         assert_eq!(conn.link_label(&None), "Session dropped");
         assert_eq!(conn.link(&Some("analytics".into())), TabLink::Up);
+
+        // A reconnect of a dropped session is still "connecting": grey, not amber.
+        conn.status = ConnStatus::Connecting;
+        assert_eq!(conn.link(&None), TabLink::Off);
+        assert_eq!(conn.link_label(&None), "Connecting…");
 
         conn.dropped.clear();
         conn.status =
