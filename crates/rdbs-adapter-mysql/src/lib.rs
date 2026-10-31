@@ -249,6 +249,10 @@ impl DatabaseAdapter for MySqlAdapter {
         &self.version
     }
 
+    fn ping(&mut self) -> BoxFuture<'_, Result<(), DbError>> {
+        Box::pin(async move { self.conn()?.ping().await.map_err(map_error) })
+    }
+
     fn load_objects(&mut self) -> BoxFuture<'_, Result<Vec<DbObject>, DbError>> {
         Box::pin(async move { catalog::load(self.conn()?).await })
     }
@@ -407,6 +411,9 @@ pub(crate) fn map_error(e: mysql_async::Error) -> DbError {
             let kind = match s.code {
                 1044 | 1045 | 1698 => DbErrorKind::Authentication,
                 1317 => DbErrorKind::Cancelled,
+                // Server shutdown, killed connection, "gone away", lost during query,
+                // disconnected for inactivity.
+                1053 | 1927 | 2006 | 2013 | 4031 => DbErrorKind::Connection,
                 _ => DbErrorKind::Query,
             };
             DbError::new(kind, s.message)
@@ -443,5 +450,16 @@ mod tests {
         }));
         assert_eq!(e.kind, DbErrorKind::Authentication);
         assert_eq!(e.code.as_deref(), Some("1045"));
+    }
+
+    #[test]
+    fn gone_away_is_a_lost_connection() {
+        let e = map_error(mysql_async::Error::Server(mysql_async::ServerError {
+            code: 2006,
+            message: "MySQL server has gone away".into(),
+            state: "HY000".into(),
+        }));
+        assert_eq!(e.kind, DbErrorKind::Connection);
+        assert!(e.is_connection_lost());
     }
 }

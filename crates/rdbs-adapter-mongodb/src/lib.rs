@@ -53,14 +53,15 @@ fn map_error(e: mongodb::error::Error) -> DbError {
         ErrorKind::ServerSelection { .. } | ErrorKind::Io(_) | ErrorKind::DnsResolve { .. } => {
             (DbErrorKind::Connection, None)
         }
-        ErrorKind::Command(c) => (
-            if c.code == 13 || c.code == 18 {
-                DbErrorKind::Authentication
-            } else {
-                DbErrorKind::Query
-            },
-            Some(c.code.to_string()),
-        ),
+        ErrorKind::Command(c) => {
+            let kind = match c.code {
+                13 | 18 => DbErrorKind::Authentication,
+                // Shutdown, not primary, interrupted because the connection went away.
+                91 | 10107 | 11600 | 11602 | 13435 | 13436 => DbErrorKind::Connection,
+                _ => DbErrorKind::Query,
+            };
+            (kind, Some(c.code.to_string()))
+        }
         ErrorKind::Write(_) | ErrorKind::InsertMany(_) | ErrorKind::BulkWrite(_) => {
             (DbErrorKind::Query, None)
         }
@@ -627,6 +628,18 @@ impl DatabaseAdapter for MongoAdapter {
 
     fn server_version(&self) -> &str {
         &self.version
+    }
+
+    fn ping(&mut self) -> BoxFuture<'_, Result<(), DbError>> {
+        let database = self.database.clone();
+        Box::pin(async move {
+            self.client
+                .database(&database)
+                .run_command(doc! { "ping": 1 })
+                .await
+                .map_err(map_error)?;
+            Ok(())
+        })
     }
 
     fn load_objects(&mut self) -> BoxFuture<'_, Result<Vec<DbObject>, DbError>> {

@@ -241,6 +241,20 @@ impl DatabaseAdapter for MssqlAdapter {
         &self.version
     }
 
+    fn ping(&mut self) -> BoxFuture<'_, Result<(), DbError>> {
+        Box::pin(async move {
+            self.client()
+                .await?
+                .simple_query("SELECT 1")
+                .await
+                .map_err(map_error)?
+                .into_results()
+                .await
+                .map_err(map_error)?;
+            Ok(())
+        })
+    }
+
     fn load_objects(&mut self) -> BoxFuture<'_, Result<Vec<DbObject>, DbError>> {
         Box::pin(async move { catalog::load(self.client().await?).await })
     }
@@ -418,6 +432,10 @@ pub(crate) fn map_error(e: tiberius::error::Error) -> DbError {
         Error::Server(t) => {
             let kind = match t.code() {
                 18456 | 18452 | 4060 => DbErrorKind::Authentication,
+                // Connection closed, network name gone, transport failures, Azure disconnects.
+                64 | 233 | 596 | 10053 | 10054 | 10060 | 40197 | 40501 | 40613 => {
+                    DbErrorKind::Connection
+                }
                 _ => DbErrorKind::Query,
             };
             DbError::new(kind, t.message())

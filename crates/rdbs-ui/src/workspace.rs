@@ -4,7 +4,8 @@ use std::collections::HashMap;
 use std::ops::Range;
 use std::time::{Duration, Instant};
 
-use egui::{Id, Ui, WidgetText};
+use egui::text::{LayoutJob, TextFormat};
+use egui::{Color32, FontId, Id, Rect, Ui, WidgetText};
 use egui_dock::tab_viewer::OnCloseResponse;
 use egui_dock::{DockState, TabViewer};
 use egui_phosphor::regular as icon;
@@ -13,7 +14,8 @@ use rdbs_services::ServiceHandle;
 use serde::{Deserialize, Serialize};
 
 use crate::grid::GridState;
-use crate::model::{ConnState, TabClose, UiAction};
+use crate::model::{ConnState, TabClose, TabLink, UiAction};
+use crate::theme::color;
 use crate::{editor, welcome};
 
 /// Initial SQL in a fresh workspace.
@@ -311,10 +313,18 @@ impl Workspace {
             } else {
                 fallback_bar
             };
+            let dot = measure("●  ");
             let widths = leaf
                 .tabs
                 .iter()
-                .map(|tab| measure(&tab.heading()))
+                .map(|tab| {
+                    let text = measure(&tab.heading());
+                    if matches!(tab, Tab::Query(_)) {
+                        text + dot
+                    } else {
+                        text
+                    }
+                })
                 .collect();
             let key = leaf.tabs.get(leaf.active.0).map(Tab::key).unwrap_or(0);
             leaves.push(LeafMeasure {
@@ -804,15 +814,24 @@ impl TabViewer for TabContext<'_> {
 
     fn title(&mut self, tab: &mut Tab) -> WidgetText {
         let full = tab.heading();
-        match (
+        let shown = match (
             self.tab_text_px,
             self.egui.as_ref(),
             self.button_font.as_ref(),
         ) {
             (Some(max_width), Some(ctx), Some(font)) => {
-                ellipsize_title(ctx, font, &full, max_width).into()
+                let room = if matches!(tab, Tab::Query(_)) {
+                    (max_width - dot_width(ctx, font)).max(4.0)
+                } else {
+                    max_width
+                };
+                ellipsize_title(ctx, font, &full, room)
             }
-            _ => full.into(),
+            _ => full,
+        };
+        match tab {
+            Tab::Query(query) => session_title(self, query, &shown),
+            _ => shown.into(),
         }
     }
 
@@ -845,25 +864,84 @@ impl TabViewer for TabContext<'_> {
 
     fn on_tab_button(&mut self, tab: &mut Tab, response: &egui::Response) {
         let full = tab.heading();
-        if let (Some(max_width), Some(ctx), Some(font)) = (
+        let shown = match (
             self.tab_text_px,
             self.egui.as_ref(),
             self.button_font.as_ref(),
         ) {
-            let shown = ellipsize_title(ctx, font, &full, max_width);
-            if shown != full {
-                response.clone().on_hover_text(full.clone());
+            (Some(max_width), Some(ctx), Some(font)) => {
+                let room = if matches!(tab, Tab::Query(_)) {
+                    (max_width - dot_width(ctx, font)).max(4.0)
+                } else {
+                    max_width
+                };
+                ellipsize_title(ctx, font, &full, room)
             }
-        }
-        if let Tab::Query(q) = tab
-            && let Some(path) = &q.path
-        {
-            response.clone().on_hover_text(path.display().to_string());
+            _ => full.clone(),
+        };
+        let query = match tab {
+            Tab::Query(query) => Some((
+                query.profile_id,
+                query.database.clone(),
+                query.run.running.is_some(),
+                query.path.clone(),
+                session_tip(self, query),
+            )),
+            _ => None,
+        };
+        if let Some((profile_id, database, running, path, tip)) = &query {
+            let mut lines = Vec::new();
+            if shown != full {
+                lines.push(full.clone());
+            }
+            if let Some(path) = path {
+                lines.push(path.display().to_string());
+            }
+            lines.push(tip.clone());
+            response.clone().on_hover_text(lines.join("\n"));
+            if response.clicked()
+                && !*running
+                && dot_clicked(response, &shown)
+                && let Some(profile_id) = *profile_id
+            {
+                self.actions.push(UiAction::Reconnect {
+                    profile_id,
+                    database: database.clone(),
+                    retry_tab: None,
+                });
+            }
+        } else if shown != full {
+            response.clone().on_hover_text(full);
         }
         // Replaces egui_dock's own tab menu (see `DockArea::tab_context_menus`).
         let key = tab.key();
         let script = matches!(tab, Tab::Query(q) if q.data_view.is_none());
+        let reconnect = query.as_ref().map(|q| (q.0, q.1.clone(), q.2));
         response.context_menu(|ui| {
+            if let Some((profile_id, database, running)) = &reconnect {
+                let enabled = profile_id.is_some() && !running;
+                if ui
+                    .add_enabled(enabled, egui::Button::new("Reconnect"))
+                    .on_hover_text(
+                        "Close this tab's database session and open a new one. The text stays.",
+                    )
+                    .on_disabled_hover_text(if profile_id.is_none() {
+                        "Choose a connection first"
+                    } else {
+                        "Wait for the running query to finish"
+                    })
+                    .clicked()
+                    && let Some(profile_id) = *profile_id
+                {
+                    self.actions.push(UiAction::Reconnect {
+                        profile_id,
+                        database: database.clone(),
+                        retry_tab: None,
+                    });
+                    ui.close();
+                }
+                ui.separator();
+            }
             if script {
                 for (label, save_as) in [("Save", false), ("Save As…", true)] {
                     if ui.button(label).clicked() {
@@ -907,6 +985,114 @@ impl TabViewer for TabContext<'_> {
         // Tabs manage their own scroll areas (editor, grid).
         [false, false]
     }
+}
+
+/// Width of the status bullet and the spaces that follow it.
+fn dot_width(ctx: &egui::Context, font: &FontId) -> f32 {
+    ctx.fonts_mut(|fonts| {
+        fonts
+            .layout_no_wrap("●  ".into(), font.clone(), Color32::WHITE)
+            .size()
+            .x
+    })
+}
+
+fn link_color(link: TabLink) -> Color32 {
+    match link {
+        TabLink::Up => color::success(),
+        TabLink::Down => color::warning(),
+        TabLink::Off => color::text_faint(),
+    }
+}
+
+fn query_link(cx: &TabContext<'_>, query: &QueryTab) -> (TabLink, &'static str) {
+    let Some(profile) = query.profile_id.and_then(|id| cx.profile(id)) else {
+        return (TabLink::Off, "No connection chosen");
+    };
+    let key = profile.session_database(query.database.clone());
+    let Some(conn) = cx.connections.get(&profile.id) else {
+        return (TabLink::Off, "Not connected");
+    };
+    (conn.link(&key), conn.link_label(&key))
+}
+
+fn session_tip(cx: &TabContext<'_>, query: &QueryTab) -> String {
+    let Some(profile) = query.profile_id.and_then(|id| cx.profile(id)) else {
+        return "No connection chosen\nClick the dot after choosing a connection".into();
+    };
+    let (_, label) = query_link(cx, query);
+    let db = query
+        .database
+        .as_deref()
+        .filter(|db| !db.is_empty())
+        .unwrap_or(profile.database.as_str());
+    let database = if db.is_empty() {
+        String::new()
+    } else {
+        format!(" · {db}")
+    };
+    format!(
+        "{}{database}\n{label}\nClick the dot, or right-click and choose Reconnect",
+        profile.name
+    )
+}
+
+/// Coloured bullet plus the tab title. The title itself keeps the tab-bar colour.
+fn session_title(cx: &TabContext<'_>, query: &QueryTab, shown: &str) -> WidgetText {
+    let font = cx
+        .button_font
+        .clone()
+        .unwrap_or_else(|| FontId::proportional(13.5));
+    let (link, _) = query_link(cx, query);
+    let mut job = LayoutJob::default();
+    job.append(
+        "●",
+        0.0,
+        TextFormat {
+            font_id: font.clone(),
+            color: link_color(link),
+            valign: egui::Align::Center,
+            ..Default::default()
+        },
+    );
+    job.append(
+        &format!("  {shown}"),
+        0.0,
+        TextFormat {
+            font_id: font,
+            color: Color32::PLACEHOLDER,
+            valign: egui::Align::Center,
+            ..Default::default()
+        },
+    );
+    job.into()
+}
+
+/// Whether the click landed on the status bullet, which sits at the start of the centred title.
+fn dot_clicked(response: &egui::Response, shown: &str) -> bool {
+    let Some(pos) = response.interact_pointer_pos() else {
+        return false;
+    };
+    let font = egui::TextStyle::Button.resolve(response.ctx.global_style().as_ref());
+    let width = |text: &str| -> f32 {
+        response.ctx.fonts_mut(|fonts| {
+            fonts
+                .layout_no_wrap(text.to_owned(), font.clone(), Color32::WHITE)
+                .size()
+                .x
+        })
+    };
+    let text_w = width(&format!("●  {shown}"));
+    let dot_w = width("●") + 8.0;
+    let mut text_rect = response.rect;
+    text_rect.set_width((text_rect.width() - 24.0).max(0.0));
+    let inner = text_rect.shrink2(egui::vec2(8.0, 0.0));
+    let left = inner.center().x - text_w / 2.0;
+    let dot = Rect::from_min_size(
+        egui::pos2(left - 1.0, response.rect.top()),
+        egui::vec2(dot_w, response.rect.height()),
+    );
+    dot.contains(pos)
 }
 
 #[cfg(test)]
