@@ -261,6 +261,11 @@ pub enum Command {
     },
     /// Stop the worker. Open sessions are closed.
     Shutdown,
+    /// Ping every idle session and drop the ones the server has closed.
+    ///
+    /// The worker sends this on a timer. A query that holds the session is left alone.
+    /// SQLite answers with a local `SELECT 1` (there is no server idle timeout).
+    ProbeSessions,
 }
 
 /// Events sent from the worker to the UI.
@@ -438,6 +443,16 @@ pub enum Event {
         profile_id: ProfileId,
         /// Outcome. The error message is already a single sentence.
         result: Result<String, DbError>,
+    },
+    /// Idle sessions were checked. `dropped` of them were discarded.
+    ///
+    /// Emitted after [`Command::ProbeSessions`] (the worker's keepalive). The UI uses
+    /// [`Event::ConnectionLost`] for the ones that died; this event only says the pass finished.
+    SessionsProbed {
+        /// Sessions that were idle and answered, or were dropped.
+        checked: usize,
+        /// Sessions discarded because the ping failed or timed out.
+        dropped: usize,
     },
     /// A connection test finished; `Ok` carries the server version.
     TestFinished {

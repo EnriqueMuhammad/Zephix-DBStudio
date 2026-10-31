@@ -15,6 +15,15 @@ and the project uses [Semantic Versioning](https://semver.org/).
 - An **Edit** menu in the top menu bar with the editor commands that lived under the
   right-click **Advanced** submenu (word wrap, white space, case, line moves, sort, indent
   and the rest), plus cut, copy, paste and comment. The right-click menu is unchanged.
+- Each query tab shows a connection dot on its title: green when that tab's session is
+  open, amber when it was dropped or the last connect failed, grey when it is not connected
+  yet or still connecting. The tooltip names the connection and the state. Clicking the dot,
+  or **Reconnect** in the tab's right-click menu, opens a new session.
+- Idle sessions are pinged about every 45 seconds, off the UI thread, and skipped while a
+  statement is running. A failed ping marks the session dropped (the tab dot turns amber)
+  without waiting for the next query. The ping also keeps a quiet networked connection from
+  sitting idle. SQLite answers with a local `SELECT 1`; the dot stays green while the file
+  is open.
 
 ## 0.3.1 - 2026-10-30
 

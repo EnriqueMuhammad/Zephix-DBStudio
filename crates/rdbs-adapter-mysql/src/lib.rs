@@ -249,6 +249,10 @@ impl DatabaseAdapter for MySqlAdapter {
         &self.version
     }
 
+    fn ping(&mut self) -> BoxFuture<'_, Result<(), DbError>> {
+        Box::pin(async move { self.conn()?.ping().await.map_err(map_error) })
+    }
+
     fn load_objects(&mut self) -> BoxFuture<'_, Result<Vec<DbObject>, DbError>> {
         Box::pin(async move { catalog::load(self.conn()?).await })
     }

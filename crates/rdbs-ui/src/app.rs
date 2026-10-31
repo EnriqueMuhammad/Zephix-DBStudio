@@ -488,6 +488,7 @@ impl StudioApp {
                     self.apply(follow_up);
                 }
             }
+            Event::SessionsProbed { .. } => {}
             Event::ReconnectFailed {
                 profile_id,
                 database,

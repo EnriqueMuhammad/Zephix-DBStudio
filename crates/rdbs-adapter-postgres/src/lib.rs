@@ -264,6 +264,15 @@ impl DatabaseAdapter for PostgresAdapter {
         &self.version
     }
 
+    fn ping(&mut self) -> BoxFuture<'_, Result<(), DbError>> {
+        Box::pin(async move {
+            self.client
+                .batch_execute("SELECT 1")
+                .await
+                .map_err(query_error)
+        })
+    }
+
     fn load_objects(&mut self) -> BoxFuture<'_, Result<Vec<DbObject>, DbError>> {
         Box::pin(catalog::load(&self.client))
     }

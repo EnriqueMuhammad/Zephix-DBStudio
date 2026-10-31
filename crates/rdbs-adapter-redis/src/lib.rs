@@ -505,6 +505,13 @@ impl DatabaseAdapter for RedisAdapter {
         &self.version
     }
 
+    fn ping(&mut self) -> BoxFuture<'_, Result<(), DbError>> {
+        Box::pin(async move {
+            self.query(&["PING".into()]).await?;
+            Ok(())
+        })
+    }
+
     fn load_objects(&mut self) -> BoxFuture<'_, Result<Vec<DbObject>, DbError>> {
         Box::pin(self.tree())
     }

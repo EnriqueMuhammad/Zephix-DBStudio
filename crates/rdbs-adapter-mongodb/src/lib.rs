@@ -630,6 +630,18 @@ impl DatabaseAdapter for MongoAdapter {
         &self.version
     }
 
+    fn ping(&mut self) -> BoxFuture<'_, Result<(), DbError>> {
+        let database = self.database.clone();
+        Box::pin(async move {
+            self.client
+                .database(&database)
+                .run_command(doc! { "ping": 1 })
+                .await
+                .map_err(map_error)?;
+            Ok(())
+        })
+    }
+
     fn load_objects(&mut self) -> BoxFuture<'_, Result<Vec<DbObject>, DbError>> {
         Box::pin(self.tree())
     }

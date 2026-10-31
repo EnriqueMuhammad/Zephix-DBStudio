@@ -298,6 +298,20 @@ impl DatabaseAdapter for OracleAdapter {
         &self.version
     }
 
+    fn ping(&mut self) -> BoxFuture<'_, Result<(), DbError>> {
+        Box::pin(self.blocking(|conn| {
+            let mut stmt = conn
+                .statement("SELECT 1 FROM DUAL")
+                .build()
+                .map_err(map_error)?;
+            let rows = stmt.query(&[]).map_err(map_error)?;
+            for row in rows.take(1) {
+                row.map_err(map_error)?;
+            }
+            Ok(())
+        }))
+    }
+
     fn load_objects(&mut self) -> BoxFuture<'_, Result<Vec<DbObject>, DbError>> {
         Box::pin(self.blocking(catalog::load))
     }

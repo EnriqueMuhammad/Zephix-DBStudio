@@ -111,6 +111,10 @@ impl DatabaseAdapter for Tunneled {
         self.inner.execute(sql, cancel)
     }
 
+    fn ping(&mut self) -> BoxFuture<'_, Result<(), DbError>> {
+        self.inner.ping()
+    }
+
     fn apply_changes<'a>(
         &'a mut self,
         changes: &'a [Change],

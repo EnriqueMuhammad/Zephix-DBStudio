@@ -8,7 +8,7 @@
 //! connection are serialised, while different connections run concurrently.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, mpsc as std_mpsc};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -62,6 +62,7 @@ impl ServiceHandle {
                     emitter,
                     sessions: Arc::default(),
                     running: Arc::default(),
+                    probing: Arc::default(),
                 };
                 runtime.block_on(worker.run(cmd_rx));
                 // Give in-flight tasks a moment to observe cancellation, then drop them.
@@ -130,8 +131,16 @@ fn command_name(command: &Command) -> &'static str {
         Command::TestConnection { .. } => "TestConnection",
         Command::RunAgentJob { .. } => "RunAgentJob",
         Command::Shutdown => "Shutdown",
+        Command::ProbeSessions => "ProbeSessions",
     }
 }
+
+/// How often an idle session is pinged. Short enough to reset common idle and NAT
+/// timeouts (about a minute), long enough that a quiet connection is not a query a second.
+const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(45);
+/// A ping that takes longer than this is a dead socket. The session lock is held only
+/// for this long, so a query waiting on the same session is not stuck for a TCP timeout.
+const KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Clone)]
 struct Emitter {
@@ -154,14 +163,34 @@ struct Worker {
     emitter: Emitter,
     sessions: Arc<Mutex<HashMap<SessionKey, SessionSlot>>>,
     running: Arc<Mutex<HashMap<RequestId, CancelHandle>>>,
+    /// True while a keepalive pass is in flight, so two timers do not ping at once.
+    probing: Arc<AtomicBool>,
+}
+
+/// Clears [`Worker::probing`] when a keepalive pass finishes or panics.
+struct ProbeGuard(Arc<AtomicBool>);
+
+impl Drop for ProbeGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
 }
 
 impl Worker {
     async fn run(self, mut commands: mpsc::UnboundedReceiver<Command>) {
-        while let Some(command) = commands.recv().await {
-            // Commands carry passwords: log only which command arrived.
-            tracing::debug!(command = command_name(&command), "worker command");
-            match command {
+        let mut keepalive = tokio::time::interval(KEEPALIVE_INTERVAL);
+        keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // The first tick of an interval is immediate. Skip it so a new session is not
+        // pinged in the same breath as the connect.
+        keepalive.tick().await;
+        loop {
+            tokio::select! {
+                biased;
+                command = commands.recv() => {
+                    let Some(command) = command else { break };
+                    // Commands carry passwords: log only which command arrived.
+                    tracing::debug!(command = command_name(&command), "worker command");
+                    match command {
                 Command::Shutdown => break,
                 Command::Cancel { request_id } => self.cancel(request_id),
                 Command::Connect { profile, password } => {
@@ -352,9 +381,75 @@ impl Worker {
                     let w = self.clone();
                     tokio::spawn(async move { w.test(request_id, profile, password).await });
                 }
+                Command::ProbeSessions => self.spawn_probe(),
+                    }
+                }
+                _ = keepalive.tick() => self.spawn_probe(),
             }
         }
         self.close_all().await;
+    }
+
+    fn spawn_probe(&self) {
+        if self.probing.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let w = self.clone();
+        tokio::spawn(async move {
+            let _guard = ProbeGuard(w.probing.clone());
+            w.probe_idle_sessions().await;
+        });
+    }
+
+    /// Pings sessions that are not in the middle of a query. A failure drops that session
+    /// and reports [`Event::ConnectionLost`]; it does not open a new one.
+    async fn probe_idle_sessions(&self) {
+        let keys: Vec<SessionKey> = {
+            let sessions = self.sessions.lock().unwrap_or_else(PoisonError::into_inner);
+            sessions.keys().cloned().collect()
+        };
+        let mut checked = 0usize;
+        let mut dropped = 0usize;
+        for key in keys {
+            let Some(slot) = self.existing_slot(&key) else {
+                continue;
+            };
+            // A running statement holds this lock. Leave it alone.
+            let Ok(mut session) = slot.try_lock() else {
+                continue;
+            };
+            if session.is_none() {
+                continue;
+            }
+            let failed = {
+                let Some(adapter) = session.as_mut() else {
+                    continue;
+                };
+                match tokio::time::timeout(KEEPALIVE_TIMEOUT, adapter.ping()).await {
+                    Ok(Ok(())) => None,
+                    Ok(Err(error)) if error.is_connection_lost() => Some(error),
+                    Ok(Err(error)) => {
+                        tracing::debug!(
+                            "keepalive ping failed without dropping the session: {error}"
+                        );
+                        None
+                    }
+                    Err(_) => Some(DbError::new(DbErrorKind::Connection, "keepalive timed out")),
+                }
+            };
+            checked += 1;
+            if let Some(error) = failed {
+                *session = None;
+                dropped += 1;
+                self.emitter.emit(Event::ConnectionLost {
+                    profile_id: key.0,
+                    database: key.1,
+                    error,
+                });
+            }
+        }
+        self.emitter
+            .emit(Event::SessionsProbed { checked, dropped });
     }
 
     fn slot(&self, key: SessionKey) -> SessionSlot {
@@ -1656,6 +1751,107 @@ mod tests {
             database: None,
         });
         let (finished, _) = until_query(&h);
+        assert!(matches!(finished, Event::QueryFinished { result, .. } if result.is_ok()));
+        assert_eq!(connect_count(&factory), 2);
+    }
+
+    fn until_probed(h: &ServiceHandle) -> (usize, usize, Vec<Event>) {
+        let deadline = Instant::now() + WAIT;
+        let mut seen = Vec::new();
+        while let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
+            match h.recv_timeout(remaining) {
+                Some(Event::SessionsProbed { checked, dropped }) => {
+                    return (checked, dropped, seen);
+                }
+                Some(event) => seen.push(event),
+                None => break,
+            }
+        }
+        panic!("timed out waiting for the keepalive probe");
+    }
+
+    #[test]
+    fn keepalive_leaves_a_live_session_open() {
+        let factory = Arc::new(RecordingFactory::default());
+        let h = ServiceHandle::spawn(
+            factory.clone(),
+            Arc::new(MemoryCredentials::default()),
+            || {},
+        )
+        .unwrap();
+        let p = profile();
+        h.send(Command::Execute {
+            request_id: h.next_request_id(),
+            profile: p.clone(),
+            sql: "select 1".into(),
+            password: None,
+            database: None,
+        });
+        let (finished, _) = until_query(&h);
+        assert!(matches!(finished, Event::QueryFinished { result, .. } if result.is_ok()));
+        assert_eq!(connect_count(&factory), 1);
+
+        h.send(Command::ProbeSessions);
+        let (checked, dropped, seen) = until_probed(&h);
+        assert_eq!((checked, dropped), (1, 0));
+        assert!(
+            !seen
+                .iter()
+                .any(|event| matches!(event, Event::ConnectionLost { .. }))
+        );
+
+        h.send(Command::Execute {
+            request_id: h.next_request_id(),
+            profile: p,
+            sql: "select 1".into(),
+            password: None,
+            database: None,
+        });
+        let (finished, _) = until_query(&h);
+        assert!(matches!(finished, Event::QueryFinished { result, .. } if result.is_ok()));
+        assert_eq!(connect_count(&factory), 1);
+    }
+
+    #[test]
+    fn keepalive_drops_a_dead_session_without_opening_a_new_one() {
+        let factory = Arc::new(RecordingFactory::default());
+        let h = ServiceHandle::spawn(
+            factory.clone(),
+            Arc::new(MemoryCredentials::default()),
+            || {},
+        )
+        .unwrap();
+        let mut p = profile();
+        p.host = "stale.example".into();
+        h.send(Command::Connect {
+            profile: p.clone(),
+            password: None,
+        });
+        wait_for(&h, |event| matches!(event, Event::ObjectsLoaded { .. }));
+        assert_eq!(connect_count(&factory), 1);
+
+        h.send(Command::ProbeSessions);
+        let (checked, dropped, seen) = until_probed(&h);
+        assert_eq!((checked, dropped), (1, 1));
+        assert!(
+            seen.iter()
+                .any(|event| matches!(event, Event::ConnectionLost { database: None, .. }))
+        );
+        assert_eq!(connect_count(&factory), 1);
+
+        h.send(Command::Execute {
+            request_id: h.next_request_id(),
+            profile: p,
+            sql: "select 1".into(),
+            password: None,
+            database: None,
+        });
+        let (finished, before) = until_query(&h);
+        assert!(
+            before
+                .iter()
+                .any(|event| matches!(event, Event::Connected { .. }))
+        );
         assert!(matches!(finished, Event::QueryFinished { result, .. } if result.is_ok()));
         assert_eq!(connect_count(&factory), 2);
     }
