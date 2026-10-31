@@ -23,7 +23,27 @@ WiX 5.0.2 from `dotnet-tools.json`.
 ## Version
 
 Bump `version` in `[workspace.package]` of `Cargo.toml` (x.y.z), then run `cargo update -w` so
-`Cargo.lock` matches (release builds use `--locked`).
+`Cargo.lock` matches (release builds use `--locked`). Date the changelog section for that version.
+
+## Draft release from a tag
+
+After that commit is on `main`, tag it and push the tag. This does not publish the release.
+
+```powershell
+git checkout main
+git pull
+git tag vX.Y.Z
+git push origin vX.Y.Z
+```
+
+`X.Y.Z` is the `[workspace.package]` version (`v0.3.2` for this release).
+
+`.github/workflows/release.yml` runs on a `v*` tag (and can be started by hand for an existing
+tag). On `windows-latest` it runs `scripts\release.ps1`: tests, a release build, the per-user MSI,
+the portable exe and `SHA256SUMS.txt`. There is no certificate, so the files are not signed.
+The workflow then opens a **draft** GitHub release for that tag and attaches those three files.
+The body is the version's section of `CHANGELOG.md`. Publish the draft from the Releases page
+when it looks right. Pushing the tag again updates the draft; it does not publish it.
 
 ## Code signing
 

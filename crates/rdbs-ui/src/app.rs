@@ -26,7 +26,7 @@ use crate::model::{
 };
 use crate::theme::{self, color};
 use crate::widgets::{self, ToolbarButton};
-use crate::workspace::{LastRun, Tab, TabContext, Workspace};
+use crate::workspace::{LastRun, RunPhase, Tab, TabContext, Workspace};
 
 /// Status text shown while an object tree reloads.
 const REFRESHING: &str = "Refreshing objects…";
@@ -662,7 +662,16 @@ impl StudioApp {
                     tracing::debug!("no tab waits for this tool result (closed?)");
                 }
             }
-            Event::QueryStarted { .. } => {
+            Event::QueryConnecting { request_id } => {
+                if let Some(running) = self
+                    .workspace
+                    .tab_for_request(request_id)
+                    .and_then(|query| query.run.running.as_mut())
+                {
+                    running.phase = RunPhase::Connecting;
+                }
+            }
+            Event::QueryStarted { request_id } => {
                 // A new run supersedes an earlier error such as "choose a connection first".
                 if self
                     .status
@@ -670,6 +679,13 @@ impl StudioApp {
                     .is_some_and(|s| s.severity == Severity::Error)
                 {
                     self.status = None;
+                }
+                if let Some(running) = self
+                    .workspace
+                    .tab_for_request(request_id)
+                    .and_then(|query| query.run.running.as_mut())
+                {
+                    running.phase = RunPhase::Running;
                 }
             }
             Event::QueryFinished {
@@ -2973,7 +2989,14 @@ impl StudioApp {
                 };
                 let password = self.session_passwords.get(&profile_id).cloned();
                 if let Some(q) = self.workspace.query_tab_mut(tab_id) {
-                    editor::start_query(q, &profile, sql, &self.services, password);
+                    editor::start_query(
+                        q,
+                        &profile,
+                        sql,
+                        &self.services,
+                        password,
+                        &self.connections,
+                    );
                 }
             }
             Confirmation::DeleteProfile(id) => self.delete_profile(id),

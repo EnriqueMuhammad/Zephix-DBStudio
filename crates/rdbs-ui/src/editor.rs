@@ -16,7 +16,7 @@ use crate::model::{AfterPassword, ConnState, ConnStatus, StatusMessage, UiAction
 use crate::textops::{self, Selection};
 use crate::theme::{self, color};
 use crate::widgets::{self, format_count, format_duration};
-use crate::workspace::{LastRun, QueryTab, RunState, Running, TabContext};
+use crate::workspace::{LastRun, QueryTab, RunPhase, RunState, Running, TabContext};
 
 /// Renders a query tab.
 pub fn show(ui: &mut Ui, q: &mut QueryTab, cx: &mut TabContext<'_>) {
@@ -79,10 +79,19 @@ fn tab_session_dropped(q: &QueryTab, cx: &TabContext<'_>) -> bool {
 /// Coloured mark next to the connection name: green when the session is up, amber when it
 /// was dropped, red when the last connect failed.
 fn session_dot(ui: &mut Ui, q: &QueryTab, cx: &TabContext<'_>) {
+    if q.run
+        .running
+        .as_ref()
+        .is_some_and(|running| running.phase == RunPhase::Connecting)
+    {
+        ui.label(RichText::new("●").color(color::text_faint()))
+            .on_hover_text("Connecting…");
+        return;
+    }
     let conn = q.profile_id.and_then(|id| cx.connections.get(&id));
     let key = tab_session_key(q, cx).unwrap_or(None);
     let (paint, tip) = match conn.map(|c| &c.status) {
-        Some(ConnStatus::Connecting) => (color::text_dim(), "Connecting…"),
+        Some(ConnStatus::Connecting) => (color::text_faint(), "Connecting…"),
         Some(ConnStatus::Failed(_)) => (color::danger(), "Connection failed — use Reconnect"),
         Some(ConnStatus::Connected { .. }) if conn.is_some_and(|c| c.session_dropped(&key)) => (
             color::warning(),
@@ -1573,7 +1582,7 @@ pub fn request_run(q: &mut QueryTab, cx: &mut TabContext<'_>) {
         return;
     }
     let password = cx.passwords.get(&profile.id).cloned();
-    start_query(q, &profile, sql_text, cx.services, password);
+    start_query(q, &profile, sql_text, cx.services, password, cx.connections);
 }
 
 /// Whether a password must be asked for before using `profile`: it does not save its
@@ -1591,16 +1600,56 @@ pub fn needs_password(
             .is_some_and(ConnState::is_connected)
 }
 
-/// Sends the query to the worker and marks the tab as running.
+/// Phase to show the moment the user runs a statement. An open session can say Running
+/// immediately; anything else stays on Connecting until [`rdbs_core::Event::QueryStarted`].
+pub fn phase_for(
+    profile: &ConnectionProfile,
+    database: &Option<String>,
+    connections: &std::collections::HashMap<rdbs_core::ProfileId, ConnState>,
+) -> RunPhase {
+    let key = profile.session_database(database.clone());
+    let open = connections
+        .get(&profile.id)
+        .is_some_and(|conn| conn.is_connected() && !conn.session_dropped(&key));
+    if open {
+        RunPhase::Running
+    } else {
+        RunPhase::Connecting
+    }
+}
+
+/// Status-line text while a query is in flight.
+pub fn in_flight_status(phase: RunPhase, name: &str, elapsed: Duration) -> String {
+    format!(
+        "{}  ·  {}  ·  {}",
+        phase.label(),
+        name,
+        format_duration(elapsed)
+    )
+}
+
+/// Spinner caption in the query tab while a query is in flight.
+pub fn in_flight_banner(phase: RunPhase, name: &str, elapsed: Duration) -> String {
+    format!(
+        "{}  {}  ·  {}",
+        phase.label(),
+        name,
+        format_duration(elapsed)
+    )
+}
+
+/// Sends the query to the worker and marks the tab as in flight.
 pub fn start_query(
     q: &mut QueryTab,
     profile: &ConnectionProfile,
     sql_text: String,
     services: &ServiceHandle,
     password: Option<String>,
+    connections: &std::collections::HashMap<rdbs_core::ProfileId, ConnState>,
 ) {
     let request_id = services.next_request_id();
     let executed = sql_text.clone();
+    let phase = phase_for(profile, &q.database, connections);
     services.send(Command::Execute {
         request_id,
         profile: profile.clone(),
@@ -1615,6 +1664,7 @@ pub fn start_query(
         profile_id: profile.id,
         sql: executed,
         database: q.database.clone(),
+        phase,
     });
     q.run.show_messages = false;
     q.run.view = crate::workspace::ResultView::Results;
@@ -1698,10 +1748,10 @@ fn results(ui: &mut Ui, q: &mut QueryTab, cx: &mut TabContext<'_>) {
                 ui.add_space(ui.available_height() * 0.35);
                 ui.add(egui::Spinner::new().size(22.0));
                 ui.label(
-                    RichText::new(format!(
-                        "Executing on {} … {}",
-                        r.profile_name,
-                        format_duration(r.started.elapsed())
+                    RichText::new(in_flight_banner(
+                        r.phase,
+                        &r.profile_name,
+                        r.started.elapsed(),
                     ))
                     .color(color::text_dim()),
                 );
@@ -2386,11 +2436,7 @@ fn status_line(ui: &mut Ui, q: &QueryTab, session_dropped: bool) {
         if let Some(r) = &q.run.running {
             ui.add(egui::Spinner::new().size(12.0));
             ui.label(small(
-                format!(
-                    "Running on {}  ·  {}",
-                    r.profile_name,
-                    format_duration(r.started.elapsed())
-                ),
+                in_flight_status(r.phase, &r.profile_name, r.started.elapsed()),
                 color::text_dim(),
             ));
         } else if let Some(last) = &q.run.last {
@@ -2530,5 +2576,48 @@ select 2 from t;
         assert_eq!(sql_to_run(&q), q.sql);
         q.run.selection = Some(100..200); // stale range is ignored
         assert_eq!(sql_to_run(&q), q.sql);
+    }
+
+    #[test]
+    fn disconnected_run_says_connecting_until_the_session_is_up() {
+        use std::collections::HashMap;
+        use std::time::Duration;
+
+        let profile = ConnectionProfile::new(rdbs_core::DatabaseKind::PostgreSql);
+        let connections = HashMap::new();
+        assert_eq!(
+            phase_for(&profile, &None, &connections),
+            RunPhase::Connecting
+        );
+
+        let up = ConnState {
+            status: ConnStatus::Connected {
+                server_version: "PostgreSQL".into(),
+                capabilities: rdbs_core::Capabilities::default(),
+            },
+            ..ConnState::default()
+        };
+        let mut connections = HashMap::new();
+        connections.insert(profile.id, up);
+        assert_eq!(phase_for(&profile, &None, &connections), RunPhase::Running);
+
+        connections
+            .get_mut(&profile.id)
+            .unwrap()
+            .dropped
+            .insert(None);
+        assert_eq!(
+            phase_for(&profile, &None, &connections),
+            RunPhase::Connecting
+        );
+
+        let elapsed = Duration::from_secs(2);
+        let connecting = in_flight_status(RunPhase::Connecting, "prod", elapsed);
+        let running = in_flight_status(RunPhase::Running, "prod", elapsed);
+        assert!(connecting.starts_with("Connecting…"), "{connecting}");
+        assert!(running.starts_with("Running…"), "{running}");
+        assert_ne!(connecting, running);
+        assert!(in_flight_banner(RunPhase::Connecting, "prod", elapsed).contains("Connecting…"));
+        assert!(in_flight_banner(RunPhase::Running, "prod", elapsed).contains("Running…"));
     }
 }

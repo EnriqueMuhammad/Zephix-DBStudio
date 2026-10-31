@@ -746,6 +746,25 @@ impl RunState {
     }
 }
 
+/// Whether an in-flight query is still opening its session or already executing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunPhase {
+    /// The worker is opening the session. The statement has not started.
+    Connecting,
+    /// The session is open and the statement is executing.
+    Running,
+}
+
+impl RunPhase {
+    /// Status-line and query-tab wording.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Connecting => "Connecting…",
+            Self::Running => "Running…",
+        }
+    }
+}
+
 /// A query in flight.
 pub struct Running {
     /// Correlation id.
@@ -760,6 +779,8 @@ pub struct Running {
     pub sql: String,
     /// Database override the query ran in (for history).
     pub database: Option<String>,
+    /// Connecting until [`rdbs_core::Event::QueryStarted`], then running.
+    pub phase: RunPhase,
 }
 
 /// A finished execution.
@@ -1010,10 +1031,27 @@ fn query_link(cx: &TabContext<'_>, query: &QueryTab) -> (TabLink, &'static str) 
         return (TabLink::Off, "No connection chosen");
     };
     let key = profile.session_database(query.database.clone());
-    let Some(conn) = cx.connections.get(&profile.id) else {
-        return (TabLink::Off, "Not connected");
-    };
-    (conn.link(&key), conn.link_label(&key))
+    query_session_link(
+        query.run.running.as_ref().map(|running| running.phase),
+        cx.connections.get(&profile.id),
+        &key,
+    )
+}
+
+/// Dot for one query tab. A query that is still connecting stays grey, including when the
+/// profile was already connected or the previous session had been dropped.
+pub fn query_session_link(
+    phase: Option<RunPhase>,
+    conn: Option<&ConnState>,
+    database: &Option<String>,
+) -> (TabLink, &'static str) {
+    if phase == Some(RunPhase::Connecting) {
+        return (TabLink::Off, "Connecting…");
+    }
+    match conn {
+        Some(conn) => (conn.link(database), conn.link_label(database)),
+        None => (TabLink::Off, "Not connected"),
+    }
 }
 
 fn session_tip(cx: &TabContext<'_>, query: &QueryTab) -> String {
@@ -1098,6 +1136,37 @@ fn dot_clicked(response: &egui::Response, shown: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::ConnStatus;
+
+    #[test]
+    fn connecting_query_keeps_the_tab_dot_grey() {
+        let mut conn = ConnState {
+            status: ConnStatus::Connected {
+                server_version: "PostgreSQL".into(),
+                capabilities: rdbs_core::Capabilities::default(),
+            },
+            ..ConnState::default()
+        };
+        let db = None;
+        assert_eq!(
+            query_session_link(Some(RunPhase::Running), Some(&conn), &db).0,
+            TabLink::Up
+        );
+        assert_eq!(
+            query_session_link(Some(RunPhase::Connecting), Some(&conn), &db),
+            (TabLink::Off, "Connecting…")
+        );
+        conn.dropped.insert(None);
+        assert_eq!(
+            query_session_link(Some(RunPhase::Connecting), Some(&conn), &db),
+            (TabLink::Off, "Connecting…")
+        );
+        assert_eq!(query_session_link(None, Some(&conn), &db).0, TabLink::Down);
+        assert_eq!(
+            query_session_link(None, None, &db),
+            (TabLink::Off, "Not connected")
+        );
+    }
 
     fn active_is_welcome(w: &mut Workspace) -> bool {
         matches!(w.dock.find_active_focused(), Some((_, Tab::Welcome)))
