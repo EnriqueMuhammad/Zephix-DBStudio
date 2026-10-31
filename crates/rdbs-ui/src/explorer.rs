@@ -142,6 +142,7 @@ fn profile_node(
 
     let key = profile_key(profile.id);
     let connected = matches!(status, Some(ConnStatus::Connected { .. }));
+    let main_dropped = conn.is_some_and(|c| c.dropped.contains(&None));
     let open = state.expanded.contains(&key) || (!needle.is_empty() && connected);
 
     let row = TreeRow {
@@ -198,7 +199,12 @@ fn profile_node(
                 egui::Spinner::new().size(12.0).paint_at(ui, r);
             }
             Some(ConnStatus::Connected { .. }) => {
-                ui.painter().circle_filled(right, 3.5, color::success());
+                let paint = if main_dropped {
+                    color::warning()
+                } else {
+                    color::success()
+                };
+                ui.painter().circle_filled(right, 3.5, paint);
             }
             Some(ConnStatus::Failed(_)) => {
                 ui.painter().text(
@@ -214,6 +220,9 @@ fn profile_node(
     });
 
     let server = match status {
+        Some(ConnStatus::Connected { server_version, .. }) if main_dropped => {
+            format!("\nSession dropped · {server_version}\nUse Reconnect — open tabs stay")
+        }
         Some(ConnStatus::Connected { server_version, .. }) => {
             format!("\nConnected · {server_version}")
         }
@@ -299,6 +308,9 @@ fn profile_node(
             hint_row(ui, 1, &e.to_string(), color::danger());
         }
         Some(ConnStatus::Connected { .. }) => {
+            if main_dropped {
+                hint_row(ui, 1, "Session dropped — Reconnect", color::warning());
+            }
             let path = PathCtx {
                 profile_id: profile.id,
                 kind: profile.kind,
@@ -329,6 +341,20 @@ fn profile_menu(
     actions: &mut Vec<UiAction>,
 ) {
     if connected {
+        if ui
+            .button(format!("{}  Reconnect", icon::ARROWS_CLOCKWISE))
+            .on_hover_text(
+                "Close the session and open a new one. Query tabs stay open. \
+                 Temporary tables and open transactions are lost.",
+            )
+            .clicked()
+        {
+            actions.push(UiAction::Reconnect {
+                profile_id: profile.id,
+                database: None,
+                retry_tab: None,
+            });
+        }
         if ui
             .button(format!("{}  Close Connection", icon::PLUGS))
             .clicked()

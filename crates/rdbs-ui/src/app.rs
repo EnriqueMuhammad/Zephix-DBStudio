@@ -192,6 +192,18 @@ pub struct StudioApp {
     exec: Option<ExecDialog>,
     /// Backup schedules and running backups.
     backups: crate::model::BackupState,
+    /// Reconnect in flight, including one that is waiting for a password or a retry.
+    reconnect: Option<ReconnectIntent>,
+}
+
+/// A reconnect the user asked for. Kept until the worker reports success or failure so a
+/// "retry" can run the same tab once the new session is open.
+#[derive(Clone)]
+struct ReconnectIntent {
+    profile_id: ProfileId,
+    /// Database override as the tab stores it (not yet reduced to a session key).
+    database: Option<String>,
+    retry_tab: Option<u64>,
 }
 
 /// A DDL request in flight.
@@ -310,6 +322,7 @@ impl StudioApp {
                 schedules,
                 ..crate::model::BackupState::default()
             },
+            reconnect: None,
         })
         .map(|mut app| {
             app.reload_history();
@@ -389,12 +402,22 @@ impl StudioApp {
                     "Connected to {} · {server_version}",
                     name_of(&self.profiles, profile_id)
                 )));
-                self.connections.entry(profile_id).or_default().status = ConnStatus::Connected {
+                let conn = self.connections.entry(profile_id).or_default();
+                // A fresh main session replaces one that was dropped.
+                conn.dropped.remove(&None);
+                conn.status = ConnStatus::Connected {
                     server_version,
                     capabilities,
                 };
             }
             Event::ConnectionFailed { profile_id, error } => {
+                if self
+                    .reconnect
+                    .as_ref()
+                    .is_some_and(|intent| intent.profile_id == profile_id)
+                {
+                    self.reconnect = None;
+                }
                 self.status = Some(StatusMessage::error(format!(
                     "{}: {error}",
                     name_of(&self.profiles, profile_id)
@@ -418,10 +441,61 @@ impl StudioApp {
                 if let Some(conn) = self.connections.get_mut(&profile_id) {
                     *conn = ConnState::default();
                 }
+                if self
+                    .reconnect
+                    .as_ref()
+                    .is_some_and(|intent| intent.profile_id == profile_id)
+                {
+                    self.reconnect = None;
+                }
                 self.explorer.collapse_profile(profile_id);
                 self.status = Some(StatusMessage::info(format!(
                     "Disconnected from {}",
                     name_of(&self.profiles, profile_id)
+                )));
+            }
+            Event::ConnectionLost {
+                profile_id,
+                database,
+                ..
+            } => {
+                let name = name_of(&self.profiles, profile_id);
+                let which = database
+                    .as_ref()
+                    .map(|db| format!(" ({db})"))
+                    .unwrap_or_default();
+                self.status = Some(StatusMessage::error(format!(
+                    "Connection to {name}{which} was lost. Reconnect keeps this tab and its text."
+                )));
+                self.connections
+                    .entry(profile_id)
+                    .or_default()
+                    .dropped
+                    .insert(database);
+            }
+            Event::Reconnected {
+                profile_id,
+                database,
+            } => {
+                if let Some(conn) = self.connections.get_mut(&profile_id) {
+                    conn.dropped.remove(&database);
+                }
+                let retry = self.take_reconnect_retry(profile_id, &database);
+                let name = name_of(&self.profiles, profile_id);
+                self.status = Some(StatusMessage::info(format!("Reconnected to {name}")));
+                if let Some(tab_id) = retry {
+                    let follow_up = self.run_tab(tab_id);
+                    self.apply(follow_up);
+                }
+            }
+            Event::ReconnectFailed {
+                profile_id,
+                database,
+                error,
+            } => {
+                let _ = self.take_reconnect_retry(profile_id, &database);
+                self.status = Some(StatusMessage::error(format!(
+                    "Could not reconnect: {error}"
                 )));
             }
             Event::ObjectsLoaded {
@@ -603,6 +677,7 @@ impl StudioApp {
                 result,
             } => {
                 let mut finished = None;
+                let mut recovered = None;
                 if let Some(q) = self.workspace.tab_for_request(request_id) {
                     let running = q.run.running.take();
                     let profile_name = running
@@ -610,6 +685,14 @@ impl StudioApp {
                         .map(|r| r.profile_name.clone())
                         .unwrap_or_default();
                     let has_results = result.as_ref().is_ok_and(|o| !o.results.is_empty());
+                    // A syntax error still means the session accepted the statement. Only a
+                    // lost connection leaves the "session dropped" mark in place.
+                    let lost = result
+                        .as_ref()
+                        .is_err_and(|error| error.is_connection_lost());
+                    if !lost && let Some(running) = &running {
+                        recovered = Some((running.profile_id, running.database.clone()));
+                    }
                     let last = LastRun {
                         elapsed,
                         outcome: result,
@@ -627,6 +710,12 @@ impl StudioApp {
                 }
                 if let Some(entry) = finished {
                     self.record_history(entry);
+                }
+                if let Some((profile_id, database)) = recovered {
+                    let key = self.normalized_session(profile_id, &database);
+                    if let Some(conn) = self.connections.get_mut(&profile_id) {
+                        conn.dropped.remove(&key);
+                    }
                 }
             }
             Event::AgentJobFinished { result, .. } => {
@@ -1250,6 +1339,11 @@ impl StudioApp {
                 UiAction::Disconnect(id) => {
                     self.services.send(Command::Disconnect { profile_id: id })
                 }
+                UiAction::Reconnect {
+                    profile_id,
+                    database,
+                    retry_tab,
+                } => self.begin_reconnect(profile_id, database, retry_tab),
                 UiAction::Refresh(id) => {
                     if self
                         .connections
@@ -1370,6 +1464,70 @@ impl StudioApp {
                 }
             }
         }
+    }
+
+    /// Session key for a tab database override. `None` is the profile's own database.
+    fn normalized_session(
+        &self,
+        profile_id: ProfileId,
+        database: &Option<String>,
+    ) -> Option<String> {
+        match self.profile(profile_id) {
+            Some(profile) => profile.session_database(database.clone()),
+            None => database.clone().filter(|db| !db.is_empty()),
+        }
+    }
+
+    /// Clears a matching reconnect and returns the tab to run again, if one was requested.
+    fn take_reconnect_retry(
+        &mut self,
+        profile_id: ProfileId,
+        database: &Option<String>,
+    ) -> Option<u64> {
+        let intent = self.reconnect.clone()?;
+        if intent.profile_id != profile_id
+            || self.normalized_session(profile_id, &intent.database) != *database
+        {
+            return None;
+        }
+        self.reconnect = None;
+        intent.retry_tab
+    }
+
+    fn begin_reconnect(
+        &mut self,
+        profile_id: ProfileId,
+        database: Option<String>,
+        retry_tab: Option<u64>,
+    ) {
+        let Some(profile) = self.profile(profile_id).cloned() else {
+            return;
+        };
+        self.reconnect = Some(ReconnectIntent {
+            profile_id,
+            database,
+            retry_tab,
+        });
+        if editor::needs_password(&profile, &self.connections, &self.session_passwords) {
+            self.open_prompt(profile_id, AfterPassword::Reconnect, None);
+            return;
+        }
+        self.send_reconnect(&profile);
+    }
+
+    fn send_reconnect(&mut self, profile: &ConnectionProfile) {
+        let Some(intent) = self.reconnect.clone() else {
+            return;
+        };
+        self.services.send(Command::Reconnect {
+            profile: profile.clone(),
+            password: self.session_passwords.get(&profile.id).cloned(),
+            database: intent.database,
+        });
+        self.status = Some(StatusMessage::info(format!(
+            "Reconnecting to {}…",
+            profile.name
+        )));
     }
 
     fn connect(&mut self, id: ProfileId) {
@@ -1901,7 +2059,17 @@ impl StudioApp {
     // ----------------------------------------------------------------------------------
     // Chrome
 
-    fn menu_bar(&mut self, ui: &mut Ui, actions: &mut Vec<UiAction>) {
+    fn menu_bar(
+        &mut self,
+        ui: &mut Ui,
+        actions: &mut Vec<UiAction>,
+    ) -> Option<editor::EditorAction> {
+        let (editor_open, has_selection) = match self.workspace.active_query_tab() {
+            Some(query) if query.data_view.is_none() => (true, query.run.selection.is_some()),
+            _ => (false, false),
+        };
+        let (word_wrap, white_space) = editor::editor_preferences(ui.ctx());
+        let mut edit_action = None;
         let ctx = ui.ctx().clone();
         let item = |label: String, sc: &KeyboardShortcut| {
             Button::new(label).shortcut_text(ctx.format_shortcut(sc))
@@ -1992,6 +2160,13 @@ impl StudioApp {
                     ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
                 }
             });
+            ui.menu_button("Edit", |ui| {
+                if let Some(action) =
+                    editor::show_edit_menu(ui, editor_open, has_selection, word_wrap, white_space)
+                {
+                    edit_action = Some(action);
+                }
+            });
             ui.menu_button("View", |ui| {
                 if ui
                     .add(item(
@@ -2076,6 +2251,42 @@ impl StudioApp {
                 }
             });
         });
+        edit_action
+    }
+
+    /// Applies an Edit-menu command to the focused query tab. The script tab stays open.
+    fn apply_editor_menu(&mut self, action: editor::EditorAction, actions: &mut Vec<UiAction>) {
+        let Self {
+            workspace,
+            profiles,
+            connections,
+            services,
+            session_passwords,
+            history,
+            backups,
+            egui_ctx,
+            ..
+        } = self;
+        let Some(query) = workspace.active_query_tab() else {
+            return;
+        };
+        if query.data_view.is_some() {
+            return;
+        }
+        let editor_id = query.editor_id();
+        let mut cx = TabContext {
+            profiles,
+            connections,
+            services,
+            passwords: session_passwords,
+            history,
+            backups,
+            actions,
+            tab_text_px: None,
+            egui: Some(egui_ctx.clone()),
+            button_font: None,
+        };
+        editor::apply_editor_action(egui_ctx, editor_id, action, query, &mut cx);
     }
 
     /// Entries of the Tools menu (scope = explorer selection).
@@ -2405,8 +2616,13 @@ impl StudioApp {
             ui.set_width(420.0);
             ui.horizontal(|ui| {
                 widgets::kind_badge(ui, profile.kind, 22.0);
+                let verb = if prompt.then == AfterPassword::Reconnect {
+                    "Reconnect to"
+                } else {
+                    "Connect to"
+                };
                 ui.label(
-                    RichText::new(format!("Connect to {}", profile.name))
+                    RichText::new(format!("{verb} {}", profile.name))
                         .size(16.0)
                         .strong(),
                 );
@@ -2436,8 +2652,13 @@ impl StudioApp {
             }
             ui.checkbox(&mut prompt.remember, "Save password in OS keychain");
             ui.add_space(8.0);
+            let verb = if prompt.then == AfterPassword::Reconnect {
+                "Reconnect"
+            } else {
+                "Connect"
+            };
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let connect = Button::new(RichText::new("Connect").color(Color32::WHITE).strong())
+                let connect = Button::new(RichText::new(verb).color(Color32::WHITE).strong())
                     .fill(color::accent())
                     .min_size(Vec2::new(96.0, 26.0));
                 if ui.add(connect).clicked() {
@@ -2452,6 +2673,12 @@ impl StudioApp {
             });
         });
         if cancel || (!submit && response.should_close()) {
+            if matches!(
+                self.prompt.as_ref().map(|prompt| prompt.then),
+                Some(AfterPassword::Reconnect)
+            ) {
+                self.reconnect = None;
+            }
             self.prompt = None;
             return;
         }
@@ -2474,6 +2701,7 @@ impl StudioApp {
                 let follow_up = self.run_tab(tab_id);
                 self.apply(follow_up);
             }
+            AfterPassword::Reconnect => self.send_reconnect(&profile),
         }
     }
 
@@ -2910,9 +3138,15 @@ impl eframe::App for StudioApp {
         self.shortcuts(&ctx, &mut actions);
 
         let bar = |m: Margin| Frame::new().fill(color::panel()).inner_margin(m);
+        let mut edit_action = None;
         egui::Panel::top(Id::new("menu-bar"))
             .frame(bar(Margin::symmetric(6, 3)))
-            .show(ui, |ui| self.menu_bar(ui, &mut actions));
+            .show(ui, |ui| {
+                edit_action = self.menu_bar(ui, &mut actions);
+            });
+        if let Some(action) = edit_action {
+            self.apply_editor_menu(action, &mut actions);
+        }
         egui::Panel::top(Id::new("toolbar"))
             .frame(bar(Margin::symmetric(8, 3)))
             .show(ui, |ui| self.toolbar(ui, &mut actions));

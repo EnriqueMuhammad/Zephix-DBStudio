@@ -3,6 +3,19 @@
 All notable changes to Zephix. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project uses [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Added
+
+- **Reconnect** on a query tab (and on a connection in the explorer). It closes that tab's
+  database session and opens a new one. The tab stays open and the editor text stays. A query
+  that fails because the server dropped the connection offers **Reconnect** and **Reconnect
+  and retry**. The dropped session is discarded, so the next statement is not sent down the
+  same dead connection.
+- An **Edit** menu in the top menu bar with the editor commands that lived under the
+  right-click **Advanced** submenu (word wrap, white space, case, line moves, sort, indent
+  and the rest), plus cut, copy, paste and comment. The right-click menu is unchanged.
+
 ## 0.3.1 - 2026-10-30
 
 ### Added

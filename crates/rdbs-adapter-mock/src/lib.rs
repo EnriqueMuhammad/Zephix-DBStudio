@@ -9,6 +9,8 @@
 //!   (default 1 000, capped at 200 000);
 //! - `FROM orders` returns order rows, anything else returns customer rows;
 //! - text containing `sleep` or `waitfor` runs for ~10 s (to try cancellation);
+//! - text containing `connection lost` fails like a server that closed an idle session
+//!   (a query error with MySQL errno 2006, so the worker must notice and drop the session);
 //! - text containing `error` fails with an engine-specific syntax error;
 //! - a read of `sysjobhistory` returns a sample Agent job history;
 //! - `sp_start_job`, `sp_stop_job` and `sp_update_job @enabled` change the sample Agent jobs
@@ -334,6 +336,12 @@ impl DatabaseAdapter for MockAdapter {
             };
             wait_cancellable(latency, &cancel).await?;
 
+            if lower.contains("connection lost") {
+                return Err(
+                    DbError::new(DbErrorKind::Query, "MySQL server has gone away")
+                        .with_code("2006"),
+                );
+            }
             if lower.contains("error") {
                 return Err(syntax_error(self.kind));
             }

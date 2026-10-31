@@ -418,6 +418,10 @@ pub(crate) fn map_error(e: tiberius::error::Error) -> DbError {
         Error::Server(t) => {
             let kind = match t.code() {
                 18456 | 18452 | 4060 => DbErrorKind::Authentication,
+                // Connection closed, network name gone, transport failures, Azure disconnects.
+                64 | 233 | 596 | 10053 | 10054 | 10060 | 40197 | 40501 | 40613 => {
+                    DbErrorKind::Connection
+                }
                 _ => DbErrorKind::Query,
             };
             DbError::new(kind, t.message())

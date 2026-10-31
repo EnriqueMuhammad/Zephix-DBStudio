@@ -274,9 +274,9 @@ pub(crate) fn map_error(e: rusqlite::Error) -> DbError {
                 return DbError::cancelled();
             }
             let kind = match code.code {
-                rusqlite::ErrorCode::CannotOpen | rusqlite::ErrorCode::NotADatabase => {
-                    DbErrorKind::Connection
-                }
+                rusqlite::ErrorCode::CannotOpen
+                | rusqlite::ErrorCode::NotADatabase
+                | rusqlite::ErrorCode::SystemIoFailure => DbErrorKind::Connection,
                 rusqlite::ErrorCode::PermissionDenied
                 | rusqlite::ErrorCode::AuthorizationForStatementDenied => {
                     DbErrorKind::Authentication

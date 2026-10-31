@@ -34,12 +34,21 @@ pub struct ConnState {
     pub default_database: Option<String>,
     /// Other databases whose objects are being loaded.
     pub loading_databases: std::collections::HashSet<String>,
+    /// Sessions the server dropped. `None` is the profile's own database.
+    ///
+    /// Open tabs and their editor text stay. Reconnect replaces the session.
+    pub dropped: std::collections::HashSet<Option<String>>,
 }
 
 impl ConnState {
     /// Whether a session is open.
     pub fn is_connected(&self) -> bool {
         matches!(self.status, ConnStatus::Connected { .. })
+    }
+
+    /// Whether the session for `database` (`None` = the profile's own database) was dropped.
+    pub fn session_dropped(&self, database: &Option<String>) -> bool {
+        self.dropped.contains(database)
     }
 }
 
@@ -105,6 +114,15 @@ pub enum UiAction {
     Connect(ProfileId),
     /// Disconnect a profile.
     Disconnect(ProfileId),
+    /// Close one session and open a new one. Tabs and their editor text stay.
+    Reconnect {
+        /// Connection.
+        profile_id: ProfileId,
+        /// Database override of the tab (`None` = the profile's own database).
+        database: Option<String>,
+        /// Run this tab again after the new session is open.
+        retry_tab: Option<u64>,
+    },
     /// Reload a profile's object tree.
     Refresh(ProfileId),
     /// Show the connection dialog for a new profile.
@@ -260,6 +278,8 @@ pub enum AfterPassword {
     Connect,
     /// Run the query tab with this id.
     RunTab(u64),
+    /// Finish the reconnect that is waiting for a password.
+    Reconnect,
 }
 
 /// Severity of a status bar message.

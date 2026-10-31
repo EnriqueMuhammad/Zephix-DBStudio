@@ -386,6 +386,9 @@ fn map_error(e: tokio_postgres::Error, fallback: DbErrorKind) -> DbError {
             DbErrorKind::Authentication
         } else if code == "57014" {
             DbErrorKind::Cancelled
+        } else if code.starts_with("08") || matches!(code, "57P01" | "57P02" | "57P03") {
+            // Connection exception, or the server shut the session down.
+            DbErrorKind::Connection
         } else {
             DbErrorKind::Query
         };
@@ -401,6 +404,13 @@ fn map_error(e: tokio_postgres::Error, fallback: DbErrorKind) -> DbError {
         return err;
     }
     // Non-server errors (I/O, TLS, timeouts) — include the source chain.
+    // A closed connection during a query must not stay filed as a SQL error, or the worker
+    // keeps the dead session and every later statement fails the same way.
+    let fallback = if e.is_closed() {
+        DbErrorKind::Connection
+    } else {
+        fallback
+    };
     let mut message = e.to_string();
     let mut source = std::error::Error::source(&e);
     while let Some(s) = source {

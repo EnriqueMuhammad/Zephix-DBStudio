@@ -78,6 +78,18 @@ pub enum Command {
         /// Profile to disconnect.
         profile_id: ProfileId,
     },
+    /// Close one session and open a new one. Editor tabs stay open; the caller keeps their text.
+    ///
+    /// `database` is the same override as [`Command::Execute`]: `None` replaces the profile's
+    /// main session. Temporary tables and open transactions on that session are lost.
+    Reconnect {
+        /// Target connection.
+        profile: ConnectionProfile,
+        /// Password entered for this session; `None` uses the credential store.
+        password: Option<String>,
+        /// Session to replace (`None` = the profile's own database).
+        database: Option<String>,
+    },
     /// Reload the object tree of an open session.
     RefreshObjects {
         /// Profile whose objects to reload.
@@ -279,6 +291,38 @@ pub enum Event {
     Disconnected {
         /// Closed profile.
         profile_id: ProfileId,
+    },
+    /// A session died (the server closed it, or the socket failed) and was discarded.
+    ///
+    /// Unlike [`Event::Disconnected`], the user did not close the connection: open tabs and
+    /// their text stay, and the explorer tree is left in place. The next use of that session
+    /// connects again; [`Command::Reconnect`] does it immediately.
+    ConnectionLost {
+        /// Profile whose session died.
+        profile_id: ProfileId,
+        /// Which session. `None` is the profile's own database.
+        database: Option<String>,
+        /// The error that revealed the drop.
+        error: DbError,
+    },
+    /// [`Command::Reconnect`] opened a new session.
+    Reconnected {
+        /// Profile that was reconnected.
+        profile_id: ProfileId,
+        /// Which session. `None` is the profile's own database.
+        database: Option<String>,
+    },
+    /// [`Command::Reconnect`] failed for a session that is not the profile's main one.
+    ///
+    /// A failed reconnect of the main session is [`Event::ConnectionFailed`] instead, which is
+    /// how every failed connect is reported.
+    ReconnectFailed {
+        /// Profile that could not be reconnected.
+        profile_id: ProfileId,
+        /// Which session. `None` is the profile's own database.
+        database: Option<String>,
+        /// Reason.
+        error: DbError,
     },
     /// The object tree was (re)loaded.
     ObjectsLoaded {
