@@ -3,7 +3,7 @@
 All notable changes to Zephix. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project uses [Semantic Versioning](https://semver.org/).
 
-## Unreleased
+## 0.3.2 - 2026-11-01
 
 ### Added
 
@@ -28,6 +28,10 @@ and the project uses [Semantic Versioning](https://semver.org/).
   without waiting for the next query. The ping also keeps a quiet networked connection from
   sitting idle. SQLite answers with a local `SELECT 1`; the dot stays green while the file
   is open.
+- Pull requests and pushes to `main` are checked on Windows and Linux (format, build, clippy
+  and tests). Pushing a `v*` tag builds the per-user Windows installer, the portable executable
+  and `SHA256SUMS.txt`, and opens a draft GitHub release. The release stays a draft until it is
+  published. The builds are not code-signed.
 
 ## 0.3.1 - 2026-10-30
 

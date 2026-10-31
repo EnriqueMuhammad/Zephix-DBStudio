@@ -1,0 +1,108 @@
+# Draft a Windows release when a v* tag is pushed. The release stays a draft until it is
+# published by hand. There is no code-signing certificate, so the files are unsigned.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to release, for example v0.3.2
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  draft:
+    name: Windows draft release
+    runs-on: windows-latest
+    env:
+      CARGO_TERM_COLOR: always
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Checkout the tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@1.95
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Check the tag matches the crate version
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:RELEASE_TAG -notmatch '^v\d+\.\d+\.\d+$') {
+            throw "Tag must look like v0.3.2 (got '$env:RELEASE_TAG')."
+          }
+          $tagged = $env:RELEASE_TAG.Substring(1)
+          $meta = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
+          $crate = ($meta.packages | Where-Object name -eq 'zephix').version
+          if ($tagged -ne $crate) {
+            throw "Tag $env:RELEASE_TAG does not match Cargo.toml ($crate)."
+          }
+
+      - name: Build the installer and portable executable
+        shell: pwsh
+        run: .\scripts\release.ps1
+
+      - name: Take the changelog section
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = $env:RELEASE_TAG.Substring(1)
+          $raw = [System.IO.File]::ReadAllText((Join-Path (Get-Location) 'CHANGELOG.md'))
+          $pattern = "(?s)## $([regex]::Escape($version)) - .*?(?=\r?\n## |\z)"
+          $match = [regex]::Match($raw, $pattern)
+          if (-not $match.Success) {
+            throw "CHANGELOG.md has no section for $version."
+          }
+          $notes = $match.Value.Trim() + "`n"
+          $path = Join-Path $env:RUNNER_TEMP 'release-notes.md'
+          [System.IO.File]::WriteAllText($path, $notes)
+
+      - name: Open or update the draft release
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          $version = $env:RELEASE_TAG.Substring(1)
+          $notes = Join-Path $env:RUNNER_TEMP 'release-notes.md'
+          $files = @(
+            "dist/Zephix-$version-x64.msi",
+            "dist/Zephix-$version-x64.exe",
+            'dist/SHA256SUMS.txt'
+          )
+          foreach ($file in $files) {
+            if (-not (Test-Path $file)) { throw "Missing $file" }
+          }
+          $view = gh release view $env:RELEASE_TAG --json isDraft 2>$null
+          if ($LASTEXITCODE -eq 0) {
+            if (-not ($view | ConvertFrom-Json).isDraft) {
+              throw "A published release already exists for $env:RELEASE_TAG. Refusing to change it."
+            }
+            gh release edit $env:RELEASE_TAG --draft --title "Zephix $version" --notes-file $notes
+            if ($LASTEXITCODE -ne 0) { throw 'Could not update the draft release.' }
+            gh release upload $env:RELEASE_TAG @files --clobber
+            if ($LASTEXITCODE -ne 0) { throw 'Could not upload the release files.' }
+          } else {
+            gh release create $env:RELEASE_TAG --draft --title "Zephix $version" --notes-file $notes @files
+            if ($LASTEXITCODE -ne 0) { throw 'Could not create the draft release.' }
+          }

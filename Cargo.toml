@@ -22,7 +22,7 @@ members = [
 exclude = ["vendor"]
 
 [workspace.package]
-version = "0.3.1"
+version = "0.3.2"
 authors = ["Enrique Muhammad Ilham"]
 edition = "2024"
 rust-version = "1.95"
