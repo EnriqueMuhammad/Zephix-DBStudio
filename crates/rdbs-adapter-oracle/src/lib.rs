@@ -82,9 +82,10 @@ pub(crate) fn map_error(e: oracle::Error) -> DbError {
     let kind = match code {
         1013 => return DbError::cancelled(),
         1017 | 1045 | 28000 | 28001 => DbErrorKind::Authentication,
-        3113 | 3114 | 3135 | 12154 | 12170 | 12514 | 12505 | 12541 | 12543 => {
-            DbErrorKind::Connection
-        }
+        // End-of-file, not connected, connection lost, idle timeout, session killed,
+        // not logged on, and the common TNS disconnects.
+        28 | 1012 | 2396 | 2399 | 3111 | 3113 | 3114 | 3135 | 12154 | 12170 | 12505 | 12514
+        | 12537 | 12541 | 12543 | 12547 | 12570 | 12571 | 25408 => DbErrorKind::Connection,
         _ if e.kind() == ErrorKind::DpiError => DbErrorKind::Connection,
         _ => DbErrorKind::Query,
     };
@@ -295,6 +296,20 @@ impl DatabaseAdapter for OracleAdapter {
 
     fn server_version(&self) -> &str {
         &self.version
+    }
+
+    fn ping(&mut self) -> BoxFuture<'_, Result<(), DbError>> {
+        Box::pin(self.blocking(|conn| {
+            let mut stmt = conn
+                .statement("SELECT 1 FROM DUAL")
+                .build()
+                .map_err(map_error)?;
+            let rows = stmt.query(&[]).map_err(map_error)?;
+            for row in rows.take(1) {
+                row.map_err(map_error)?;
+            }
+            Ok(())
+        }))
     }
 
     fn load_objects(&mut self) -> BoxFuture<'_, Result<Vec<DbObject>, DbError>> {

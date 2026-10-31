@@ -257,6 +257,16 @@ pub trait DatabaseAdapter: Send {
         Box::pin(async { Err(unsupported("execution plans")) })
     }
 
+    /// Cheap round-trip that proves the session is still usable.
+    ///
+    /// The worker calls this on idle sessions. It must not change data. The default does
+    /// nothing and reports success; networked engines override it with a ping or `SELECT 1`.
+    /// A lost connection is [`DbErrorKind::Connection`] (or otherwise
+    /// [`DbError::is_connection_lost`]) so the worker can drop the session.
+    fn ping(&mut self) -> BoxFuture<'_, Result<(), DbError>> {
+        Box::pin(async { Ok(()) })
+    }
+
     /// Gracefully closes the session. The default implementation does nothing.
     fn close(&mut self) -> BoxFuture<'_, ()> {
         Box::pin(async {})

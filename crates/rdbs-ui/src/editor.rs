@@ -36,6 +36,7 @@ pub fn show(ui: &mut Ui, q: &mut QueryTab, cx: &mut TabContext<'_>) {
             }
         });
 
+    let session_dropped = tab_session_dropped(q, cx);
     egui::Panel::bottom(Id::new(("q-status", q.id)))
         .exact_size(24.0)
         .frame(
@@ -43,7 +44,7 @@ pub fn show(ui: &mut Ui, q: &mut QueryTab, cx: &mut TabContext<'_>) {
                 .fill(color::panel())
                 .inner_margin(Margin::symmetric(8, 0)),
         )
-        .show(ui, |ui| status_line(ui, q));
+        .show(ui, |ui| status_line(ui, q, session_dropped));
 
     if data_tab {
         egui::CentralPanel::no_frame().show(ui, |ui| results(ui, q, cx));
@@ -58,6 +59,71 @@ pub fn show(ui: &mut Ui, q: &mut QueryTab, cx: &mut TabContext<'_>) {
         .show(ui, |ui| editor(ui, q, cx));
 
     egui::CentralPanel::no_frame().show(ui, |ui| results(ui, q, cx));
+}
+
+/// Session key for this tab: `None` when it uses the profile's own database.
+fn tab_session_key(q: &QueryTab, cx: &TabContext<'_>) -> Option<Option<String>> {
+    let profile = q.profile_id.and_then(|id| cx.profile(id))?;
+    Some(profile.session_database(q.database.clone()))
+}
+
+fn tab_session_dropped(q: &QueryTab, cx: &TabContext<'_>) -> bool {
+    let Some(key) = tab_session_key(q, cx) else {
+        return false;
+    };
+    q.profile_id
+        .and_then(|id| cx.connections.get(&id))
+        .is_some_and(|conn| conn.session_dropped(&key))
+}
+
+/// Coloured mark next to the connection name: green when the session is up, amber when it
+/// was dropped, red when the last connect failed.
+fn session_dot(ui: &mut Ui, q: &QueryTab, cx: &TabContext<'_>) {
+    let conn = q.profile_id.and_then(|id| cx.connections.get(&id));
+    let key = tab_session_key(q, cx).unwrap_or(None);
+    let (paint, tip) = match conn.map(|c| &c.status) {
+        Some(ConnStatus::Connecting) => (color::text_dim(), "Connecting…"),
+        Some(ConnStatus::Failed(_)) => (color::danger(), "Connection failed — use Reconnect"),
+        Some(ConnStatus::Connected { .. }) if conn.is_some_and(|c| c.session_dropped(&key)) => (
+            color::warning(),
+            "Session dropped — Reconnect opens a new one. This tab stays open.",
+        ),
+        Some(ConnStatus::Connected { .. }) => (color::success(), "Connected"),
+        _ => (color::text_faint(), "Not connected"),
+    };
+    ui.label(RichText::new("●").color(paint)).on_hover_text(tip);
+}
+
+/// Replaces this tab's database session. The editor text and the tab stay.
+fn reconnect_button(ui: &mut Ui, q: &QueryTab, cx: &mut TabContext<'_>) {
+    let profile = q.profile_id.and_then(|id| cx.profile(id));
+    let running = q.run.running.is_some();
+    let dropped = tab_session_dropped(q, cx);
+    let label = RichText::new(format!("{}  Reconnect", icon::ARROWS_CLOCKWISE));
+    let label = if dropped {
+        label.color(color::warning())
+    } else {
+        label
+    };
+    let enabled = profile.is_some() && !running;
+    let mut response = ui.add_enabled(enabled, Button::new(label)).on_hover_text(
+        "Close this tab's database session and open a new one. The editor text stays. \
+             Temporary tables, open transactions, and an in-memory SQLite database are lost.",
+    );
+    if profile.is_none() {
+        response = response.on_disabled_hover_text("Choose a connection first");
+    } else if running {
+        response = response.on_disabled_hover_text("Wait for the running query to finish");
+    }
+    if response.clicked()
+        && let Some(profile) = profile
+    {
+        cx.actions.push(UiAction::Reconnect {
+            profile_id: profile.id,
+            database: q.database.clone(),
+            retry_tab: None,
+        });
+    }
 }
 
 fn toolbar(ui: &mut Ui, q: &mut QueryTab, cx: &mut TabContext<'_>) {
@@ -118,6 +184,9 @@ fn toolbar(ui: &mut Ui, q: &mut QueryTab, cx: &mut TabContext<'_>) {
         if let Some(p) = current {
             widgets::env_pill(ui, p.environment);
         }
+        ui.separator();
+        session_dot(ui, q, cx);
+        reconnect_button(ui, q, cx);
         ui.separator();
         let can_explain = match q.profile_id.and_then(|id| cx.connections.get(&id)) {
             Some(ConnState {
@@ -180,14 +249,18 @@ fn data_toolbar(ui: &mut Ui, q: &mut QueryTab, cx: &mut TabContext<'_>) {
                 q.saved = q.sql.clone();
                 q.run.focus_editor = true;
             }
-            if let Some(p) = q.profile_id.and_then(|id| cx.profile(id)) {
+            if q.profile_id.and_then(|id| cx.profile(id)).is_some() {
                 ui.separator();
-                widgets::env_pill(ui, p.environment);
-                ui.label(
-                    RichText::new(format!("{}  {}", p.kind.badge(), p.name))
-                        .color(color::text_dim()),
-                )
-                .on_hover_text(p.endpoint());
+                reconnect_button(ui, q, cx);
+                session_dot(ui, q, cx);
+                if let Some(p) = q.profile_id.and_then(|id| cx.profile(id)) {
+                    widgets::env_pill(ui, p.environment);
+                    ui.label(
+                        RichText::new(format!("{}  {}", p.kind.badge(), p.name))
+                            .color(color::text_dim()),
+                    )
+                    .on_hover_text(p.endpoint());
+                }
             }
             ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
                 let refresh = Button::new(
@@ -881,9 +954,10 @@ fn outside_speed(pointer: f32, min: f32, max: f32) -> f32 {
     }
 }
 
-/// Commands of the editor's context menu and shortcuts.
+/// Commands of the editor's context menu, Edit menu and shortcuts.
+#[allow(missing_docs)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum EditorAction {
+pub(crate) enum EditorAction {
     Cut,
     Copy,
     Paste,
@@ -908,202 +982,405 @@ enum EditorAction {
     DecreaseIndent,
 }
 
+/// Where an editor command is shown.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MenuGlyph {
+    /// Fixed icon, or a blank of the same width.
+    Fixed(&'static str),
+    /// Check mark follows the word-wrap preference.
+    WordWrap,
+    /// Check mark follows the white-space preference.
+    WhiteSpace,
+}
+
+/// One row of the editor menus. The same list feeds the top Edit menu and the context menu.
+#[derive(Clone, Copy)]
+struct MenuEntry {
+    action: EditorAction,
+    label: &'static str,
+    shortcut: &'static str,
+    glyph: MenuGlyph,
+    /// `0` clipboard, `1` select all, `2` comments, `3` the old Advanced group, `4` run.
+    section: u8,
+    /// Shown in the top Edit menu.
+    edit: bool,
+    /// Shown in the context menu itself. Advanced rows are `false` and live in the submenu.
+    context_root: bool,
+    needs_selection: bool,
+}
+
+/// Editor commands, in menu order. Advanced rows are also in the top Edit menu.
+fn menu_entries() -> &'static [MenuEntry] {
+    use EditorAction as A;
+    use MenuGlyph::Fixed;
+    const ADVANCED: u8 = 3;
+    &[
+        MenuEntry {
+            action: A::Cut,
+            label: "Cut",
+            shortcut: "Ctrl+X",
+            glyph: Fixed(icon::SCISSORS),
+            section: 0,
+            edit: true,
+            context_root: true,
+            needs_selection: true,
+        },
+        MenuEntry {
+            action: A::Copy,
+            label: "Copy",
+            shortcut: "Ctrl+C",
+            glyph: Fixed(icon::COPY),
+            section: 0,
+            edit: true,
+            context_root: true,
+            needs_selection: true,
+        },
+        MenuEntry {
+            action: A::Paste,
+            label: "Paste",
+            shortcut: "Ctrl+V",
+            glyph: Fixed(icon::CLIPBOARD_TEXT),
+            section: 0,
+            edit: true,
+            context_root: true,
+            needs_selection: false,
+        },
+        MenuEntry {
+            action: A::SelectAll,
+            label: "Select All",
+            shortcut: "Ctrl+A",
+            glyph: Fixed(icon::SELECTION_ALL),
+            section: 1,
+            edit: true,
+            context_root: true,
+            needs_selection: false,
+        },
+        MenuEntry {
+            action: A::Comment,
+            label: "Comment Selection",
+            shortcut: "Ctrl+K, Ctrl+C",
+            glyph: Fixed(icon::CHAT_CENTERED_SLASH),
+            section: 2,
+            edit: true,
+            context_root: true,
+            needs_selection: false,
+        },
+        MenuEntry {
+            action: A::Uncomment,
+            label: "Uncomment Selection",
+            shortcut: "Ctrl+K, Ctrl+U",
+            glyph: Fixed(icon::CHAT_CENTERED),
+            section: 2,
+            edit: true,
+            context_root: true,
+            needs_selection: false,
+        },
+        MenuEntry {
+            action: A::Tabify,
+            label: "Tabify Selected Lines",
+            shortcut: "",
+            glyph: Fixed(icon::ARROW_LINE_RIGHT),
+            section: ADVANCED,
+            edit: true,
+            context_root: false,
+            needs_selection: false,
+        },
+        MenuEntry {
+            action: A::Untabify,
+            label: "Untabify Selected Lines",
+            shortcut: "",
+            glyph: Fixed(icon::ARROW_LINE_LEFT),
+            section: ADVANCED,
+            edit: true,
+            context_root: false,
+            needs_selection: false,
+        },
+        MenuEntry {
+            action: A::Uppercase,
+            label: "Make Uppercase",
+            shortcut: "Ctrl+Shift+U",
+            glyph: Fixed(icon::TEXT_AA),
+            section: ADVANCED,
+            edit: true,
+            context_root: false,
+            needs_selection: false,
+        },
+        MenuEntry {
+            action: A::Lowercase,
+            label: "Make Lowercase",
+            shortcut: "Ctrl+Shift+L",
+            glyph: Fixed(" "),
+            section: ADVANCED,
+            edit: true,
+            context_root: false,
+            needs_selection: false,
+        },
+        MenuEntry {
+            action: A::MoveLinesUp,
+            label: "Move Selected Lines Up",
+            shortcut: "Alt+Up Arrow",
+            glyph: Fixed(icon::ARROW_UP),
+            section: ADVANCED,
+            edit: true,
+            context_root: false,
+            needs_selection: false,
+        },
+        MenuEntry {
+            action: A::MoveLinesDown,
+            label: "Move Selected Lines Down",
+            shortcut: "Alt+Down Arrow",
+            glyph: Fixed(icon::ARROW_DOWN),
+            section: ADVANCED,
+            edit: true,
+            context_root: false,
+            needs_selection: false,
+        },
+        MenuEntry {
+            action: A::DeleteWhiteSpace,
+            label: "Delete Horizontal White Space",
+            shortcut: "Ctrl+K, Ctrl+\\",
+            glyph: Fixed(" "),
+            section: ADVANCED,
+            edit: true,
+            context_root: false,
+            needs_selection: false,
+        },
+        MenuEntry {
+            action: A::ToggleWhiteSpace,
+            label: "View White Space",
+            shortcut: "Ctrl+E, Ctrl+S",
+            glyph: MenuGlyph::WhiteSpace,
+            section: ADVANCED,
+            edit: true,
+            context_root: false,
+            needs_selection: false,
+        },
+        MenuEntry {
+            action: A::ToggleWordWrap,
+            label: "Word Wrap",
+            shortcut: "Ctrl+E, Ctrl+W",
+            glyph: MenuGlyph::WordWrap,
+            section: ADVANCED,
+            edit: true,
+            context_root: false,
+            needs_selection: false,
+        },
+        MenuEntry {
+            action: A::SortLines,
+            label: "Sort Lines",
+            shortcut: "Shift+Alt+L, Shift+Alt+S",
+            glyph: Fixed(icon::SORT_ASCENDING),
+            section: ADVANCED,
+            edit: true,
+            context_root: false,
+            needs_selection: false,
+        },
+        MenuEntry {
+            action: A::JoinLines,
+            label: "Join Lines",
+            shortcut: "Shift+Alt+L, Shift+Alt+J",
+            glyph: Fixed(" "),
+            section: ADVANCED,
+            edit: true,
+            context_root: false,
+            needs_selection: false,
+        },
+        MenuEntry {
+            action: A::Subword {
+                forward: true,
+                extend: false,
+            },
+            label: "Next Subword",
+            shortcut: "Ctrl+Alt+Right Arrow",
+            glyph: Fixed(" "),
+            section: ADVANCED,
+            edit: true,
+            context_root: false,
+            needs_selection: false,
+        },
+        MenuEntry {
+            action: A::Subword {
+                forward: false,
+                extend: false,
+            },
+            label: "Previous Subword",
+            shortcut: "Ctrl+Alt+Left Arrow",
+            glyph: Fixed(" "),
+            section: ADVANCED,
+            edit: true,
+            context_root: false,
+            needs_selection: false,
+        },
+        MenuEntry {
+            action: A::ExpandToLine,
+            label: "Expand Selection to Line",
+            shortcut: "Shift+Alt+E",
+            glyph: Fixed(" "),
+            section: ADVANCED,
+            edit: true,
+            context_root: false,
+            needs_selection: false,
+        },
+        MenuEntry {
+            action: A::IncreaseIndent,
+            label: "Increase Line Indent",
+            shortcut: "Tab",
+            glyph: Fixed(icon::TEXT_INDENT),
+            section: ADVANCED,
+            edit: true,
+            context_root: false,
+            needs_selection: false,
+        },
+        MenuEntry {
+            action: A::DecreaseIndent,
+            label: "Decrease Line Indent",
+            shortcut: "Shift+Tab",
+            glyph: Fixed(icon::TEXT_OUTDENT),
+            section: ADVANCED,
+            edit: true,
+            context_root: false,
+            needs_selection: false,
+        },
+        MenuEntry {
+            action: A::Run,
+            label: "Run",
+            shortcut: "Ctrl+Enter",
+            glyph: Fixed(icon::PLAY),
+            section: 4,
+            edit: false,
+            context_root: true,
+            needs_selection: false,
+        },
+    ]
+}
+
+fn entry_glyph(entry: &MenuEntry, word_wrap: bool, white_space: bool) -> &'static str {
+    match entry.glyph {
+        MenuGlyph::Fixed(icon) => icon,
+        MenuGlyph::WordWrap => {
+            if word_wrap {
+                icon::CHECK
+            } else {
+                " "
+            }
+        }
+        MenuGlyph::WhiteSpace => {
+            if white_space {
+                icon::CHECK
+            } else {
+                " "
+            }
+        }
+    }
+}
+
+/// Draws `entries` and returns the one that was clicked. A separator sits between sections.
+fn show_menu_entries(
+    ui: &mut Ui,
+    entries: impl Iterator<Item = &'static MenuEntry>,
+    editor_open: bool,
+    has_selection: bool,
+    word_wrap: bool,
+    white_space: bool,
+) -> Option<EditorAction> {
+    let mut action = None;
+    let mut last_section = None;
+    for entry in entries {
+        if last_section.is_some_and(|section| section != entry.section) {
+            ui.separator();
+        }
+        last_section = Some(entry.section);
+        let label = if entry.action == EditorAction::Run && has_selection {
+            "Run Selection"
+        } else {
+            entry.label
+        };
+        let enabled = editor_open && (!entry.needs_selection || has_selection);
+        let button = Button::new(format!(
+            "{}  {label}",
+            entry_glyph(entry, word_wrap, white_space)
+        ))
+        .shortcut_text(entry.shortcut);
+        let mut response = ui.add_enabled(enabled, button);
+        if !editor_open {
+            response = response.on_disabled_hover_text("Open a query tab to edit its script");
+        }
+        if response.clicked() {
+            action = Some(entry.action);
+        }
+    }
+    action
+}
+
+/// Word wrap and visible white space, shared by every query tab.
+pub(crate) fn editor_preferences(ctx: &egui::Context) -> (bool, bool) {
+    (pref(ctx, WORD_WRAP), pref(ctx, WHITE_SPACE))
+}
+
+/// Top Edit menu: clipboard, comments, and every command that used to live under Advanced.
+pub(crate) fn show_edit_menu(
+    ui: &mut Ui,
+    editor_open: bool,
+    has_selection: bool,
+    word_wrap: bool,
+    white_space: bool,
+) -> Option<EditorAction> {
+    show_menu_entries(
+        ui,
+        menu_entries().iter().filter(|entry| entry.edit),
+        editor_open,
+        has_selection,
+        word_wrap,
+        white_space,
+    )
+}
+
 fn editor_menu(
     ui: &mut Ui,
     has_selection: bool,
     word_wrap: bool,
     white_space: bool,
 ) -> Option<EditorAction> {
-    use EditorAction as A;
-    let mut action = None;
-    let mut item = |ui: &mut Ui, enabled: bool, glyph: &str, label: &str, keys: &str, a| {
-        let button = Button::new(format!("{glyph}  {label}")).shortcut_text(keys);
-        if ui.add_enabled(enabled, button).clicked() {
-            action = Some(a);
-        }
-    };
-    item(ui, has_selection, icon::SCISSORS, "Cut", "Ctrl+X", A::Cut);
-    item(ui, has_selection, icon::COPY, "Copy", "Ctrl+C", A::Copy);
-    item(ui, true, icon::CLIPBOARD_TEXT, "Paste", "Ctrl+V", A::Paste);
-    ui.separator();
-    item(
+    let mut action = show_menu_entries(
         ui,
+        menu_entries()
+            .iter()
+            .filter(|entry| entry.context_root && entry.section < 3),
         true,
-        icon::SELECTION_ALL,
-        "Select All",
-        "Ctrl+A",
-        A::SelectAll,
+        has_selection,
+        word_wrap,
+        white_space,
     );
     ui.separator();
-    item(
-        ui,
-        true,
-        icon::CHAT_CENTERED_SLASH,
-        "Comment Selection",
-        "Ctrl+K, Ctrl+C",
-        A::Comment,
-    );
-    item(
-        ui,
-        true,
-        icon::CHAT_CENTERED,
-        "Uncomment Selection",
-        "Ctrl+K, Ctrl+U",
-        A::Uncomment,
-    );
     ui.menu_button(format!("{}  Advanced", icon::TEXT_AA), |ui| {
-        let blank = " ";
-        item(
+        if let Some(chosen) = show_menu_entries(
             ui,
+            menu_entries().iter().filter(|entry| entry.section == 3),
             true,
-            icon::ARROW_LINE_RIGHT,
-            "Tabify Selected Lines",
-            "",
-            A::Tabify,
-        );
-        item(
-            ui,
-            true,
-            icon::ARROW_LINE_LEFT,
-            "Untabify Selected Lines",
-            "",
-            A::Untabify,
-        );
-        item(
-            ui,
-            true,
-            icon::TEXT_AA,
-            "Make Uppercase",
-            "Ctrl+Shift+U",
-            A::Uppercase,
-        );
-        item(
-            ui,
-            true,
-            blank,
-            "Make Lowercase",
-            "Ctrl+Shift+L",
-            A::Lowercase,
-        );
-        item(
-            ui,
-            true,
-            icon::ARROW_UP,
-            "Move Selected Lines Up",
-            "Alt+Up Arrow",
-            A::MoveLinesUp,
-        );
-        item(
-            ui,
-            true,
-            icon::ARROW_DOWN,
-            "Move Selected Lines Down",
-            "Alt+Down Arrow",
-            A::MoveLinesDown,
-        );
-        item(
-            ui,
-            true,
-            blank,
-            "Delete Horizontal White Space",
-            "Ctrl+K, Ctrl+\\",
-            A::DeleteWhiteSpace,
-        );
-        let check = |on: bool| if on { icon::CHECK } else { " " };
-        item(
-            ui,
-            true,
-            check(white_space),
-            "View White Space",
-            "Ctrl+E, Ctrl+S",
-            A::ToggleWhiteSpace,
-        );
-        item(
-            ui,
-            true,
-            check(word_wrap),
-            "Word Wrap",
-            "Ctrl+E, Ctrl+W",
-            A::ToggleWordWrap,
-        );
-        ui.separator();
-        item(
-            ui,
-            true,
-            icon::SORT_ASCENDING,
-            "Sort Lines",
-            "Shift+Alt+L, Shift+Alt+S",
-            A::SortLines,
-        );
-        item(
-            ui,
-            true,
-            blank,
-            "Join Lines",
-            "Shift+Alt+L, Shift+Alt+J",
-            A::JoinLines,
-        );
-        item(
-            ui,
-            true,
-            blank,
-            "Next Subword",
-            "Ctrl+Alt+Right Arrow",
-            A::Subword {
-                forward: true,
-                extend: false,
-            },
-        );
-        item(
-            ui,
-            true,
-            blank,
-            "Previous Subword",
-            "Ctrl+Alt+Left Arrow",
-            A::Subword {
-                forward: false,
-                extend: false,
-            },
-        );
-        item(
-            ui,
-            true,
-            blank,
-            "Expand Selection to Line",
-            "Shift+Alt+E",
-            A::ExpandToLine,
-        );
-        ui.separator();
-        item(
-            ui,
-            true,
-            icon::TEXT_INDENT,
-            "Increase Line Indent",
-            "Tab",
-            A::IncreaseIndent,
-        );
-        item(
-            ui,
-            true,
-            icon::TEXT_OUTDENT,
-            "Decrease Line Indent",
-            "Shift+Tab",
-            A::DecreaseIndent,
-        );
+            has_selection,
+            word_wrap,
+            white_space,
+        ) {
+            action = Some(chosen);
+        }
     });
     ui.separator();
-    let run = if has_selection {
-        "Run Selection"
-    } else {
-        "Run"
-    };
-    item(ui, true, icon::PLAY, run, "Ctrl+Enter", A::Run);
+    if let Some(chosen) = show_menu_entries(
+        ui,
+        menu_entries().iter().filter(|entry| entry.section == 4),
+        true,
+        has_selection,
+        word_wrap,
+        white_space,
+    ) {
+        action = Some(chosen);
+    }
     action
 }
 
 /// Carries out a context-menu or shortcut command. Clipboard commands go through the platform
 /// clipboard (the backend turns them into the same events as the keyboard shortcuts).
-fn apply_editor_action(
+pub(crate) fn apply_editor_action(
     ctx: &egui::Context,
     editor_id: Id,
     action: EditorAction,
@@ -1390,7 +1667,7 @@ fn results(ui: &mut Ui, q: &mut QueryTab, cx: &mut TabContext<'_>) {
         }
         match &q.run.plan {
             Some(Ok(plan)) => crate::plan::show(ui, plan, &mut q.run.plan_view),
-            Some(Err(e)) => error_panel(ui, e),
+            Some(Err(e)) => error_panel(ui, e, reconnect_target(q), cx.actions),
             None => {}
         }
         return;
@@ -1399,6 +1676,7 @@ fn results(ui: &mut Ui, q: &mut QueryTab, cx: &mut TabContext<'_>) {
     let data_tab = q.data_view.is_some();
     let export_table = export_table_name(&q.title);
     let table = q.table.clone();
+    let reconnect = reconnect_target(q);
     let RunState {
         running,
         last,
@@ -1456,7 +1734,7 @@ fn results(ui: &mut Ui, q: &mut QueryTab, cx: &mut TabContext<'_>) {
                 "No rows were returned",
             );
         }
-        Err(e) => error_panel(ui, e),
+        Err(e) => error_panel(ui, e, reconnect, cx.actions),
         Ok(outcome) => {
             let count = outcome.results.len();
             if *active_result >= count {
@@ -2001,7 +2279,19 @@ fn messages(ui: &mut Ui, last: &LastRun) {
     });
 }
 
-fn error_panel(ui: &mut Ui, e: &rdbs_core::DbError) {
+/// Profile, database override and tab id, when the failure can offer Reconnect.
+fn reconnect_target(q: &QueryTab) -> Option<(rdbs_core::ProfileId, Option<String>, u64)> {
+    q.profile_id
+        .map(|profile_id| (profile_id, q.database.clone(), q.id))
+}
+
+fn error_panel(
+    ui: &mut Ui,
+    e: &rdbs_core::DbError,
+    reconnect: Option<(rdbs_core::ProfileId, Option<String>, u64)>,
+    actions: &mut Vec<UiAction>,
+) {
+    let lost = e.is_connection_lost();
     ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
         Frame::new()
             .fill(color::danger().gamma_multiply(0.08))
@@ -2012,8 +2302,13 @@ fn error_panel(ui: &mut Ui, e: &rdbs_core::DbError) {
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 ui.horizontal(|ui| {
+                    let title = if lost {
+                        "Connection lost"
+                    } else {
+                        "Query failed"
+                    };
                     ui.label(
-                        RichText::new(format!("{}  Query failed", icon::WARNING))
+                        RichText::new(format!("{}  {title}", icon::WARNING))
                             .strong()
                             .color(color::danger()),
                     );
@@ -2033,6 +2328,38 @@ fn error_panel(ui: &mut Ui, e: &rdbs_core::DbError) {
                 if let Some(detail) = &e.detail {
                     ui.label(RichText::new(detail).color(color::text_dim()));
                 }
+                if lost && let Some((profile_id, database, tab_id)) = reconnect {
+                    ui.add_space(8.0);
+                    ui.label(
+                        RichText::new(
+                            "Reconnect opens a new session for this tab. The text stays; \
+                             temporary tables and open transactions are lost.",
+                        )
+                        .color(color::text_dim()),
+                    );
+                    ui.horizontal(|ui| {
+                        if ui
+                            .button(format!("{}  Reconnect", icon::ARROWS_CLOCKWISE))
+                            .clicked()
+                        {
+                            actions.push(UiAction::Reconnect {
+                                profile_id,
+                                database: database.clone(),
+                                retry_tab: None,
+                            });
+                        }
+                        if ui
+                            .button(format!("{}  Reconnect and retry", icon::PLAY))
+                            .clicked()
+                        {
+                            actions.push(UiAction::Reconnect {
+                                profile_id,
+                                database,
+                                retry_tab: Some(tab_id),
+                            });
+                        }
+                    });
+                }
             });
     });
 }
@@ -2046,9 +2373,16 @@ fn placeholder(ui: &mut Ui, glyph: &str, title: &str, hint: &str) {
     });
 }
 
-fn status_line(ui: &mut Ui, q: &QueryTab) {
+fn status_line(ui: &mut Ui, q: &QueryTab, session_dropped: bool) {
     ui.horizontal_centered(|ui| {
         let small = |t: String, c| RichText::new(t).size(12.0).color(c);
+        if session_dropped && q.run.running.is_none() {
+            ui.label(small(
+                format!("{}  Session dropped", icon::WARNING),
+                color::warning(),
+            ));
+            ui.label(small("·".into(), color::text_faint()));
+        }
         if let Some(r) = &q.run.running {
             ui.add(egui::Spinner::new().size(12.0));
             ui.label(small(
@@ -2111,6 +2445,52 @@ fn status_line(ui: &mut Ui, q: &QueryTab) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn edit_menu_includes_the_advanced_editor_options() {
+        use EditorAction as A;
+        let edit: Vec<EditorAction> = menu_entries()
+            .iter()
+            .filter(|entry| entry.edit)
+            .map(|entry| entry.action)
+            .collect();
+        for action in [
+            A::Cut,
+            A::Copy,
+            A::Paste,
+            A::SelectAll,
+            A::Comment,
+            A::Uncomment,
+            A::Tabify,
+            A::Untabify,
+            A::Uppercase,
+            A::Lowercase,
+            A::MoveLinesUp,
+            A::MoveLinesDown,
+            A::DeleteWhiteSpace,
+            A::ToggleWhiteSpace,
+            A::ToggleWordWrap,
+            A::SortLines,
+            A::JoinLines,
+            A::Subword {
+                forward: true,
+                extend: false,
+            },
+            A::Subword {
+                forward: false,
+                extend: false,
+            },
+            A::ExpandToLine,
+            A::IncreaseIndent,
+            A::DecreaseIndent,
+        ] {
+            assert!(edit.contains(&action), "{action:?} is missing from Edit");
+        }
+        assert!(!edit.contains(&A::Run));
+        assert!(menu_entries().iter().any(|entry| {
+            entry.action == A::ToggleWordWrap && entry.edit && !entry.context_root
+        }));
+    }
 
     #[test]
     fn export_table_name_uses_plain_titles_only() {

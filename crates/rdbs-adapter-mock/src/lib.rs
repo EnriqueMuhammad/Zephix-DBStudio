@@ -9,11 +9,14 @@
 //!   (default 1 000, capped at 200 000);
 //! - `FROM orders` returns order rows, anything else returns customer rows;
 //! - text containing `sleep` or `waitfor` runs for ~10 s (to try cancellation);
+//! - text containing `connection lost` fails like a server that closed an idle session
+//!   (a query error with MySQL errno 2006, so the worker must notice and drop the session);
 //! - text containing `error` fails with an engine-specific syntax error;
 //! - a read of `sysjobhistory` returns a sample Agent job history;
 //! - `sp_start_job`, `sp_stop_job` and `sp_update_job @enabled` change the sample Agent jobs
 //!   so a refresh shows the new state;
-//! - a host containing `fail` makes the connection attempt fail.
+//! - a host containing `fail` makes the connection attempt fail;
+//! - a host containing `stale` connects, then the keepalive ping reports the session dead.
 
 mod data;
 
@@ -82,6 +85,7 @@ impl AdapterFactory for MockAdapterFactory {
                 kind: profile.kind,
                 version: server_version(profile.kind).to_owned(),
                 query_latency: self.query_latency,
+                fail_ping: profile.host.to_ascii_lowercase().contains("stale"),
                 jobs: if profile.kind == DatabaseKind::SqlServer {
                     data::sample_agent_summaries()
                 } else {
@@ -99,6 +103,8 @@ pub struct MockAdapter {
     kind: DatabaseKind,
     version: String,
     query_latency: Duration,
+    /// Keepalive ping fails, as if the server had closed an idle session.
+    fail_ping: bool,
     /// SQL Server Agent jobs for this session. Start, stop and enable change them.
     jobs: Vec<rdbs_core::agent::AgentJobSummary>,
 }
@@ -192,6 +198,19 @@ impl DatabaseAdapter for MockAdapter {
 
     fn server_version(&self) -> &str {
         &self.version
+    }
+
+    fn ping(&mut self) -> BoxFuture<'_, Result<(), DbError>> {
+        Box::pin(async move {
+            if self.fail_ping {
+                Err(DbError::new(
+                    DbErrorKind::Connection,
+                    "server closed the connection unexpectedly",
+                ))
+            } else {
+                Ok(())
+            }
+        })
     }
 
     fn apply_changes<'a>(
@@ -334,6 +353,12 @@ impl DatabaseAdapter for MockAdapter {
             };
             wait_cancellable(latency, &cancel).await?;
 
+            if lower.contains("connection lost") {
+                return Err(
+                    DbError::new(DbErrorKind::Query, "MySQL server has gone away")
+                        .with_code("2006"),
+                );
+            }
             if lower.contains("error") {
                 return Err(syntax_error(self.kind));
             }

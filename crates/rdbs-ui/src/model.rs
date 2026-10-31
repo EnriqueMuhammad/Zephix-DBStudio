@@ -34,6 +34,10 @@ pub struct ConnState {
     pub default_database: Option<String>,
     /// Other databases whose objects are being loaded.
     pub loading_databases: std::collections::HashSet<String>,
+    /// Sessions the server dropped. `None` is the profile's own database.
+    ///
+    /// Open tabs and their editor text stay. Reconnect replaces the session.
+    pub dropped: std::collections::HashSet<Option<String>>,
 }
 
 impl ConnState {
@@ -41,6 +45,48 @@ impl ConnState {
     pub fn is_connected(&self) -> bool {
         matches!(self.status, ConnStatus::Connected { .. })
     }
+
+    /// Whether the session for `database` (`None` = the profile's own database) was dropped.
+    pub fn session_dropped(&self, database: &Option<String>) -> bool {
+        self.dropped.contains(database)
+    }
+
+    /// How a query tab should paint this session. Amber means reconnect; grey means there is
+    /// no live session yet (disconnected or still connecting).
+    pub fn link(&self, database: &Option<String>) -> TabLink {
+        if self.session_dropped(database) || matches!(self.status, ConnStatus::Failed(_)) {
+            TabLink::Down
+        } else if matches!(self.status, ConnStatus::Connected { .. }) {
+            TabLink::Up
+        } else {
+            TabLink::Off
+        }
+    }
+
+    /// Short label for [`Self::link`], including the connecting and failed cases.
+    pub fn link_label(&self, database: &Option<String>) -> &'static str {
+        if self.session_dropped(database) {
+            "Session dropped"
+        } else {
+            match &self.status {
+                ConnStatus::Connected { .. } => "Connected",
+                ConnStatus::Failed(_) => "Connection failed",
+                ConnStatus::Connecting => "Connecting…",
+                ConnStatus::Disconnected => "Not connected",
+            }
+        }
+    }
+}
+
+/// Colour of the dot on a query tab.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TabLink {
+    /// Green: the session is open.
+    Up,
+    /// Amber: dropped, or the last connect failed. Reconnect replaces it.
+    Down,
+    /// Grey: no session yet, or a connect is still in progress.
+    Off,
 }
 
 /// Reference to a database object selected in the explorer.
@@ -105,6 +151,15 @@ pub enum UiAction {
     Connect(ProfileId),
     /// Disconnect a profile.
     Disconnect(ProfileId),
+    /// Close one session and open a new one. Tabs and their editor text stay.
+    Reconnect {
+        /// Connection.
+        profile_id: ProfileId,
+        /// Database override of the tab (`None` = the profile's own database).
+        database: Option<String>,
+        /// Run this tab again after the new session is open.
+        retry_tab: Option<u64>,
+    },
     /// Reload a profile's object tree.
     Refresh(ProfileId),
     /// Show the connection dialog for a new profile.
@@ -260,6 +315,8 @@ pub enum AfterPassword {
     Connect,
     /// Run the query tab with this id.
     RunTab(u64),
+    /// Finish the reconnect that is waiting for a password.
+    Reconnect,
 }
 
 /// Severity of a status bar message.
@@ -295,5 +352,39 @@ impl StatusMessage {
             severity: Severity::Error,
             text: text.into(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tab_link_is_green_when_up_amber_when_dropped_grey_otherwise() {
+        let mut conn = ConnState::default();
+        assert_eq!(conn.link(&None), TabLink::Off);
+        assert_eq!(conn.link_label(&None), "Not connected");
+
+        conn.status = ConnStatus::Connecting;
+        assert_eq!(conn.link(&None), TabLink::Off);
+        assert_eq!(conn.link_label(&None), "Connecting…");
+
+        conn.status = ConnStatus::Connected {
+            server_version: "PostgreSQL".into(),
+            capabilities: Capabilities::default(),
+        };
+        assert_eq!(conn.link(&None), TabLink::Up);
+        assert_eq!(conn.link(&Some("analytics".into())), TabLink::Up);
+
+        conn.dropped.insert(None);
+        assert_eq!(conn.link(&None), TabLink::Down);
+        assert_eq!(conn.link_label(&None), "Session dropped");
+        assert_eq!(conn.link(&Some("analytics".into())), TabLink::Up);
+
+        conn.dropped.clear();
+        conn.status =
+            ConnStatus::Failed(DbError::new(rdbs_core::DbErrorKind::Connection, "refused"));
+        assert_eq!(conn.link(&None), TabLink::Down);
+        assert_eq!(conn.link_label(&None), "Connection failed");
     }
 }

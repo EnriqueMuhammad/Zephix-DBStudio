@@ -89,7 +89,12 @@ fn ensure_crypto_provider() {
 }
 
 pub(crate) fn map_error(e: redis::RedisError) -> DbError {
-    let kind = if e.is_io_error() || e.is_connection_refusal() || e.is_timeout() {
+    let message = e.detail().map_or_else(|| e.to_string(), str::to_owned);
+    let kind = if e.is_io_error()
+        || e.is_connection_refusal()
+        || e.is_timeout()
+        || message.to_ascii_lowercase().contains("connection closed")
+    {
         DbErrorKind::Connection
     } else if matches!(e.kind(), redis::ErrorKind::AuthenticationFailed)
         || e.code()
@@ -99,10 +104,7 @@ pub(crate) fn map_error(e: redis::RedisError) -> DbError {
     } else {
         DbErrorKind::Query
     };
-    let mut err = DbError::new(
-        kind,
-        e.detail().map_or_else(|| e.to_string(), str::to_owned),
-    );
+    let mut err = DbError::new(kind, message);
     if let Some(code) = e.code() {
         err = err.with_code(code);
     }
@@ -501,6 +503,13 @@ impl DatabaseAdapter for RedisAdapter {
 
     fn server_version(&self) -> &str {
         &self.version
+    }
+
+    fn ping(&mut self) -> BoxFuture<'_, Result<(), DbError>> {
+        Box::pin(async move {
+            self.query(&["PING".into()]).await?;
+            Ok(())
+        })
     }
 
     fn load_objects(&mut self) -> BoxFuture<'_, Result<Vec<DbObject>, DbError>> {

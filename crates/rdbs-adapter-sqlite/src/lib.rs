@@ -114,6 +114,14 @@ impl DatabaseAdapter for SqliteAdapter {
         &self.version
     }
 
+    fn ping(&mut self) -> BoxFuture<'_, Result<(), DbError>> {
+        // No server to time out. The file is open when this returns.
+        Box::pin(self.blocking(|conn| {
+            conn.query_row("SELECT 1", [], |_| Ok(()))
+                .map_err(map_error)
+        }))
+    }
+
     fn load_objects(&mut self) -> BoxFuture<'_, Result<Vec<DbObject>, DbError>> {
         Box::pin(self.blocking(catalog::load))
     }
@@ -274,9 +282,9 @@ pub(crate) fn map_error(e: rusqlite::Error) -> DbError {
                 return DbError::cancelled();
             }
             let kind = match code.code {
-                rusqlite::ErrorCode::CannotOpen | rusqlite::ErrorCode::NotADatabase => {
-                    DbErrorKind::Connection
-                }
+                rusqlite::ErrorCode::CannotOpen
+                | rusqlite::ErrorCode::NotADatabase
+                | rusqlite::ErrorCode::SystemIoFailure => DbErrorKind::Connection,
                 rusqlite::ErrorCode::PermissionDenied
                 | rusqlite::ErrorCode::AuthorizationForStatementDenied => {
                     DbErrorKind::Authentication

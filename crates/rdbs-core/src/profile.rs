@@ -349,6 +349,14 @@ impl ConnectionProfile {
         }
     }
 
+    /// Session key for a tab that runs in `database`.
+    ///
+    /// `None` is this profile's own database (one shared session). A different, non-empty name
+    /// is a separate session, matching how the worker opens connections.
+    pub fn session_database(&self, database: Option<String>) -> Option<String> {
+        database.filter(|db| !db.is_empty() && *db != self.database)
+    }
+
     /// `host:port/database` summary for tooltips and status bars.
     pub fn endpoint(&self) -> String {
         if !self.kind.is_networked() {
@@ -527,6 +535,19 @@ mod tests {
         json.as_object_mut().unwrap().remove("ssh");
         let back: ConnectionProfile = serde_json::from_value(json).unwrap();
         assert_eq!(back.ssh, None);
+    }
+
+    #[test]
+    fn session_database_is_none_for_the_profile_default() {
+        let mut p = ConnectionProfile::new(DatabaseKind::PostgreSql);
+        p.database = "app".into();
+        assert_eq!(p.session_database(None), None);
+        assert_eq!(p.session_database(Some(String::new())), None);
+        assert_eq!(p.session_database(Some("app".into())), None);
+        assert_eq!(
+            p.session_database(Some("analytics".into())),
+            Some("analytics".into())
+        );
     }
 
     #[test]

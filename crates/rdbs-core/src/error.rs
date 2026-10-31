@@ -77,6 +77,90 @@ impl DbError {
     pub fn cancelled() -> Self {
         Self::new(DbErrorKind::Cancelled, "Query cancelled by user")
     }
+
+    /// Whether this error means the session is dead and should be replaced.
+    ///
+    /// Transport failures count, and so do the vendor codes and phrases servers use when they
+    /// close an idle session ("server has gone away", admin shutdown, "broken pipe"). A syntax
+    /// error, a constraint failure, a statement timeout, or a bad password does not: the session
+    /// is still usable.
+    pub fn is_connection_lost(&self) -> bool {
+        if self.kind == DbErrorKind::Connection {
+            return true;
+        }
+        if matches!(
+            self.kind,
+            DbErrorKind::Cancelled | DbErrorKind::Authentication | DbErrorKind::Unsupported
+        ) {
+            return false;
+        }
+        self.code.as_deref().is_some_and(code_is_connection_lost)
+            || text_is_connection_lost(&self.message)
+            || self.detail.as_deref().is_some_and(text_is_connection_lost)
+    }
+}
+
+/// Vendor codes that mean the server dropped the session, even when the adapter filed the
+/// error as a query failure.
+fn code_is_connection_lost(code: &str) -> bool {
+    matches!(
+        code,
+        // MySQL / MariaDB errno
+        "1053" | "1927" | "2006" | "2013" | "4031"
+        // SQL Server
+        | "64" | "233" | "596" | "10053" | "10054" | "10060" | "40197" | "40501" | "40613"
+        // PostgreSQL SQLSTATE (class 08 and admin shutdown)
+        | "08000" | "08001" | "08003" | "08004" | "08006" | "08007" | "57P01" | "57P02" | "57P03"
+        // Oracle
+        | "ORA-00028" | "ORA-01012" | "ORA-02396" | "ORA-02399" | "ORA-03111" | "ORA-03113"
+        | "ORA-03114" | "ORA-03135" | "ORA-12170" | "ORA-12537" | "ORA-12547" | "ORA-12570"
+        | "ORA-12571" | "ORA-25408"
+        // MongoDB server codes (shutdown, not primary, interrupted)
+        | "91" | "10107" | "11600" | "11602" | "13435" | "13436"
+    )
+}
+
+/// Phrases drivers put in the message when the socket dies and there is no vendor code.
+fn text_is_connection_lost(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    const PHRASES: &[&str] = &[
+        "server has gone away",
+        "lost connection",
+        "connection reset",
+        "connection closed",
+        "connection is closed",
+        "broken pipe",
+        "server closed the connection",
+        "error communicating with",
+        "not connected",
+        "session has been killed",
+        "your session has been killed",
+        "terminating connection",
+        "the connection is broken",
+        "transport-level error",
+        "connection refused",
+        "connection timed out",
+        "i/o timed out",
+        "network is unreachable",
+        "no connection to the server",
+        "ssl connection has been closed",
+        "unexpected eof",
+        "unexpected end of file",
+        "server shutdown in progress",
+        "client was disconnected",
+        "ora-00028",
+        "ora-01012",
+        "ora-02396",
+        "ora-03113",
+        "ora-03114",
+        "ora-03135",
+        "ora-12170",
+        "ora-12537",
+        "ora-12570",
+        "ora-12571",
+        "ora-25408",
+    ];
+    PHRASES.iter().any(|phrase| lower.contains(phrase))
 }
 
 impl fmt::Display for DbError {
@@ -115,6 +199,58 @@ mod tests {
             .with_detail("certificate expired")
             .with_reachability_hint("localhost:5432");
         assert_eq!(tls.detail.as_deref(), Some("certificate expired"));
+    }
+
+    #[test]
+    fn connection_lost_covers_transport_and_vendor_drop_signals() {
+        assert!(
+            DbError::new(DbErrorKind::Connection, "connection reset by peer").is_connection_lost()
+        );
+        assert!(
+            DbError::new(DbErrorKind::Query, "MySQL server has gone away")
+                .with_code("2006")
+                .is_connection_lost()
+        );
+        assert!(
+            DbError::new(
+                DbErrorKind::Query,
+                "error communicating with the database: broken pipe"
+            )
+            .is_connection_lost()
+        );
+        assert!(
+            DbError::new(
+                DbErrorKind::Query,
+                "terminating connection due to administrator command"
+            )
+            .with_code("57P01")
+            .is_connection_lost()
+        );
+        assert!(
+            DbError::new(DbErrorKind::Query, "ORA-03114: not connected to ORACLE")
+                .is_connection_lost()
+        );
+
+        assert!(
+            !DbError::new(DbErrorKind::Query, "syntax error at or near \"from\"")
+                .with_code("42601")
+                .is_connection_lost()
+        );
+        assert!(
+            !DbError::new(
+                DbErrorKind::Authentication,
+                "password authentication failed"
+            )
+            .is_connection_lost()
+        );
+        assert!(!DbError::cancelled().is_connection_lost());
+        assert!(
+            !DbError::new(
+                DbErrorKind::Timeout,
+                "canceling statement due to statement timeout"
+            )
+            .is_connection_lost()
+        );
     }
 
     #[test]
