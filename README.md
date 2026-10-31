@@ -3,6 +3,8 @@
 Native desktop database IDE for PostgreSQL, MySQL, MariaDB, SQL Server, SQLite, Oracle, MongoDB,
 and Redis. Written in Rust (egui). One executable on Windows, macOS, and Linux.
 
+[![CI](https://github.com/EnriqueMuhammad/Zephix-DBStudio/actions/workflows/ci.yml/badge.svg)](https://github.com/EnriqueMuhammad/Zephix-DBStudio/actions/workflows/ci.yml)
+
 ![Main window: connection tree, SQL editor, and result grid](docs/screenshots/main-window.webp)
 
 The screenshots in this README are from `zephix --demo`. That mode uses a built-in sample engine
@@ -109,6 +111,23 @@ RDBS_IT=1 cargo test --workspace -- --test-threads=1
 
 Without `RDBS_IT=1` the integration tests are skipped. Oracle runs separately
 (`--profile oracle`, `RDBS_ORACLE=1`, Oracle Instant Client). Design notes: [docs/](docs/).
+
+## Continuous integration
+
+Pull requests and pushes to `main` run the same checks on `windows-latest` and `ubuntu-latest`
+(Linux installs the X11, Wayland, and OpenGL packages the egui window needs to link):
+
+```bash
+cargo fmt --all --check
+cargo build --profile ci --workspace
+cargo clippy --profile ci --workspace --all-targets -- -D warnings
+cargo test --profile ci --workspace --lib --tests
+```
+
+`profile.ci` is a debug build whose dependencies compile at `opt-level` 0, so a clean CI machine
+is not spending its time optimising every crate. Local development is unchanged: `cargo build`
+and `cargo test` still use the dev profile, which optimises dependencies so the UI stays
+responsive. Integration tests that need Docker stay out of CI; run those locally with `RDBS_IT=1`.
 
 ## Quick start
 
