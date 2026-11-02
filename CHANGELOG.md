@@ -3,6 +3,26 @@
 All notable changes to Zephix. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project uses [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Added
+
+- **Help > Check for Updates…** compares the running version with the latest published
+  release on GitHub and says whether it is up to date, which version is available (with a
+  button that opens its release page), or why the check failed. The app also checks once at
+  start-up, off the UI thread: when a newer version exists, a short toast and a **New version
+  available** item in the status bar point to it. **Skip This Version** silences both until a
+  later release. The start-up check can be turned off in the Help menu or the update dialog.
+- Backticks close themselves in the SQL editor like quotes and brackets.
+
+### Fixed
+
+- Typing `'`, `"`, `(` or `[` in the SQL editor now inserts the closing character. With a
+  real keyboard it never did, because the key press arrives just before the character and
+  hid it. Typing the closer steps over it, an opener wraps the selection, and Backspace
+  between an empty pair deletes both. Quotes and brackets typed inside a string, a quoted
+  identifier or a comment, or a quote typed right after a word, stay single.
+
 ## 0.3.2 - 2026-11-01
 
 ### Added

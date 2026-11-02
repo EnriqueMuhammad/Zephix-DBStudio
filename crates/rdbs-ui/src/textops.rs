@@ -119,13 +119,34 @@ fn closer(c: char) -> Option<char> {
         '[' => Some(']'),
         '\'' => Some('\''),
         '"' => Some('"'),
+        '`' => Some('`'),
         _ => None,
     }
 }
 
-/// Typing `ch` with brackets and quotes closed automatically: `(`, `[`, `'` and `"` insert
-/// their pair (or wrap the selection), and typing a closer right before the same closer steps
-/// over it. Returns `None` when the character should be inserted normally.
+/// Whether character index `at` lies inside a string literal, quoted identifier or comment,
+/// where a quote or bracket is plain text. A literal that is still open at `at` counts as
+/// inside; the position right after a closed one does not.
+fn in_literal_or_comment(chars: &[char], at: usize) -> bool {
+    use rdbs_core::sql::{TokenKind, tokenize};
+    // A letter appended to the prefix joins the token that is still open at `at`, and
+    // starts a token of its own after one that is closed.
+    let mut probe: String = chars[..at].iter().collect();
+    let sentinel = probe.len();
+    probe.push('x');
+    tokenize(&probe).last().is_some_and(|t| {
+        t.range.start < sentinel
+            && matches!(
+                t.kind,
+                TokenKind::String | TokenKind::QuotedIdentifier | TokenKind::Comment
+            )
+    })
+}
+
+/// Typing `ch` with brackets and quotes closed automatically: `(`, `[`, `'`, `"` and `` ` ``
+/// insert their pair (or wrap the selection), and typing a closer right before the same closer
+/// steps over it. Nothing is paired inside a string, quoted identifier or comment. Returns
+/// `None` when the character should be inserted normally.
 pub fn type_char(text: &str, sel: Selection, ch: char) -> Option<Edit> {
     let chars: Vec<char> = text.chars().collect();
     let r = sel.range();
@@ -134,7 +155,7 @@ pub fn type_char(text: &str, sel: Selection, ch: char) -> Option<Edit> {
     }
     let next = chars.get(r.end).copied();
     let prev = r.start.checked_sub(1).map(|i| chars[i]);
-    if sel.is_empty() && matches!(ch, ')' | ']' | '\'' | '"') && next == Some(ch) {
+    if sel.is_empty() && matches!(ch, ')' | ']' | '\'' | '"' | '`') && next == Some(ch) {
         return Some(Edit {
             text: text.to_owned(),
             selection: Selection::caret(r.end + 1),
@@ -151,10 +172,10 @@ pub fn type_char(text: &str, sel: Selection, ch: char) -> Option<Edit> {
     }
     // Only before blanks, closers or separators, so typing in front of a word stays plain.
     let free_after = next.is_none_or(|c| c.is_whitespace() || matches!(c, ')' | ']' | ',' | ';'));
-    if !free_after {
+    if !free_after || in_literal_or_comment(&chars, r.start) {
         return None;
     }
-    if matches!(ch, '\'' | '"') && prev.is_some_and(is_word) {
+    if matches!(ch, '\'' | '"' | '`') && prev.is_some_and(is_word) {
         // An apostrophe inside a word stays single; N'…' (Unicode literals) still pairs.
         let word_start = chars[..r.start]
             .iter()
@@ -641,6 +662,60 @@ mod tests {
         assert!(type_char("don", caret(3), '\'').is_none());
         assert!(type_char("abc", caret(0), '(').is_none());
         assert!(type_char("a", caret(1), 'b').is_none());
+    }
+
+    #[test]
+    fn pairs_backticks_like_quotes() {
+        let e = type_char("select ", caret(7), '`').unwrap();
+        assert_eq!((e.text.as_str(), e.selection), ("select ``", caret(8)));
+        let e = type_char("select ``", caret(8), '`').unwrap();
+        assert_eq!((e.text.as_str(), e.selection), ("select ``", caret(9)));
+        assert!(type_char("a", caret(1), '`').is_none());
+        assert_eq!(
+            type_char("x", Selection::new(0, 1), '`').unwrap().text,
+            "`x`"
+        );
+        assert_eq!(backspace("``", caret(1)).unwrap().text, "");
+    }
+
+    #[test]
+    fn does_not_pair_inside_strings_or_comments() {
+        // Inside a string literal, quoted identifier or comment the character stays single.
+        assert!(type_char("x = 'a b'", caret(6), '(').is_none());
+        assert!(type_char("x = ' '", caret(5), '"').is_none());
+        assert!(type_char("x = 'open ", caret(10), '(').is_none());
+        assert!(type_char("select \"my col ", caret(15), '(').is_none());
+        assert!(type_char("select 1 -- note ", caret(17), '\'').is_none());
+        assert!(type_char("/* see ", caret(7), '(').is_none());
+        assert!(type_char("$$ body ", caret(8), '\'').is_none());
+        // After a closed literal or comment pairing works again.
+        assert_eq!(
+            type_char("x = 'a' || ", caret(11), '\'').unwrap().text,
+            "x = 'a' || ''"
+        );
+        assert_eq!(
+            type_char("/* c */ ", caret(8), '(').unwrap().text,
+            "/* c */ ()"
+        );
+        assert_eq!(type_char("-- c\n", caret(5), '(').unwrap().text, "-- c\n()");
+        // Wrapping a selection and stepping over a closer still work inside a string.
+        assert_eq!(
+            type_char("'a b'", Selection::new(1, 2), '(').unwrap().text,
+            "'(a) b'"
+        );
+        assert_eq!(
+            type_char("'ab'", caret(3), '\'').unwrap().selection,
+            caret(4)
+        );
+    }
+
+    #[test]
+    fn doubled_quote_escape_types_naturally() {
+        // 'don|' : the quote steps over the closer, the next one pairs again: 'don''|'
+        let e = type_char("'don'", caret(4), '\'').unwrap();
+        assert_eq!(e.selection, caret(5));
+        let e = type_char(&e.text, e.selection, '\'').unwrap();
+        assert_eq!((e.text.as_str(), e.selection), ("'don'''", caret(6)));
     }
 
     #[test]

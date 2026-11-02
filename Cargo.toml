@@ -82,6 +82,8 @@ calamine = { version = "0.36", features = ["dates"] }
 encoding_rs = "0.8"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 tokio-util = { version = "0.7", features = ["compat"] }
+# Update check (ADR 0013): blocking HTTPS on a worker thread, rustls + ring like the drivers.
+ureq = { version = "3.4", default-features = false, features = ["rustls"] }
 
 # Database drivers (ADR 0004). TLS uses rustls with the `ring` provider everywhere.
 tokio-postgres = "0.7"
