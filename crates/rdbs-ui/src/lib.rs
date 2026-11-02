@@ -16,6 +16,7 @@ mod scripts;
 mod textops;
 pub mod theme;
 mod tools;
+mod update;
 mod welcome;
 mod widgets;
 mod window;

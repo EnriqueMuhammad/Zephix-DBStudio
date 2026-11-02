@@ -19,6 +19,8 @@ use rdbs_core::{
 };
 use tokio::sync::{Mutex as AsyncMutex, mpsc};
 
+mod update;
+
 type Notify = Arc<dyn Fn() + Send + Sync>;
 type SessionSlot = Arc<AsyncMutex<Option<Box<dyn DatabaseAdapter>>>>;
 /// A session is per profile and, for non-default databases, per database.
@@ -132,6 +134,7 @@ fn command_name(command: &Command) -> &'static str {
         Command::RunAgentJob { .. } => "RunAgentJob",
         Command::Shutdown => "Shutdown",
         Command::ProbeSessions => "ProbeSessions",
+        Command::CheckForUpdates { .. } => "CheckForUpdates",
     }
 }
 
@@ -382,6 +385,15 @@ impl Worker {
                     tokio::spawn(async move { w.test(request_id, profile, password).await });
                 }
                 Command::ProbeSessions => self.spawn_probe(),
+                Command::CheckForUpdates { manual } => {
+                    let emitter = self.emitter.clone();
+                    tokio::spawn(async move {
+                        let result = tokio::task::spawn_blocking(update::fetch_latest_release)
+                            .await
+                            .unwrap_or_else(|e| Err(format!("The update check stopped: {e}")));
+                        emitter.emit(Event::UpdateChecked { manual, result });
+                    });
+                }
                     }
                 }
                 _ = keepalive.tick() => self.spawn_probe(),

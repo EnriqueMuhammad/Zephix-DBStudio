@@ -13,6 +13,8 @@ rdbs-core.workspace = true
 rdbs-transfer.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+ureq.workspace = true
+rustls-native-certs.workspace = true
 
 [dev-dependencies]
 rdbs-adapter-mock.workspace = true

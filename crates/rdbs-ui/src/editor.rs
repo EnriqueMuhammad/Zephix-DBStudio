@@ -816,11 +816,15 @@ fn auto_close(ui: &mut Ui, editor_id: Id, q: &mut QueryTab) {
         return;
     };
     let edit = ui.input_mut(|i| {
-        let first = i.events.iter().position(|e| {
-            matches!(
-                e,
-                Event::Text(_) | Event::Paste(_) | Event::Ime(_) | Event::Key { pressed: true, .. }
-            )
+        let first = i.events.iter().position(|e| match e {
+            Event::Text(_) | Event::Paste(_) | Event::Ime(_) | Event::Cut => true,
+            Event::Key {
+                key,
+                pressed: true,
+                modifiers,
+                ..
+            } => key_edits(*key, *modifiers),
+            _ => false,
         })?;
         let edit = match &i.events[first] {
             Event::Text(t) => {
@@ -844,6 +848,33 @@ fn auto_close(ui: &mut Ui, editor_id: Id, q: &mut QueryTab) {
     if let Some(edit) = edit {
         apply_edit(&ctx, editor_id, q, edit);
     }
+}
+
+/// Whether a key press moves the caret or changes the text by itself. A printable key does
+/// not: the window sends its press just before the `Event::Text` with the character, and
+/// the text editor only acts on the text.
+fn key_edits(key: Key, modifiers: Modifiers) -> bool {
+    modifiers.ctrl
+        || modifiers.command
+        || modifiers.mac_cmd
+        || matches!(
+            key,
+            Key::ArrowDown
+                | Key::ArrowLeft
+                | Key::ArrowRight
+                | Key::ArrowUp
+                | Key::Tab
+                | Key::Backspace
+                | Key::Enter
+                | Key::Delete
+                | Key::Home
+                | Key::End
+                | Key::PageUp
+                | Key::PageDown
+                | Key::Copy
+                | Key::Cut
+                | Key::Paste
+        )
 }
 
 /// The editor's selection in characters.
@@ -2536,6 +2567,96 @@ mod tests {
         assert!(menu_entries().iter().any(|entry| {
             entry.action == A::ToggleWordWrap && entry.edit && !entry.context_root
         }));
+    }
+
+    /// Runs one frame of [`auto_close`] on `text` with the caret (or selection) at `sel`.
+    fn type_events(text: &str, sel: Selection, events: Vec<Event>) -> (String, Selection) {
+        let ctx = egui::Context::default();
+        let mut q = QueryTab::new(1, None, text.into(), None);
+        let editor_id = q.editor_id();
+        set_selection(&ctx, editor_id, sel);
+        let input = egui::RawInput {
+            events,
+            ..egui::RawInput::default()
+        };
+        let mut output = ctx.run_ui(input, |ui| auto_close(ui, editor_id, &mut q));
+        output.textures_delta.clear();
+        let after = current_selection(&ctx, editor_id).unwrap();
+        (q.sql, after)
+    }
+
+    fn key(key: Key, modifiers: Modifiers) -> Event {
+        Event::Key {
+            key,
+            physical_key: Some(key),
+            pressed: true,
+            repeat: false,
+            modifiers,
+        }
+    }
+
+    /// What the window sends for a printable key: its key press, then the character.
+    fn typed(k: Key, modifiers: Modifiers, text: &str) -> Vec<Event> {
+        vec![key(k, modifiers), Event::Text(text.into())]
+    }
+
+    #[test]
+    fn typed_quote_and_parenthesis_close_themselves() {
+        let caret = Selection::caret;
+        let (none, shift) = (Modifiers::NONE, Modifiers::SHIFT);
+        // The key press that comes before the character does not hide it.
+        assert_eq!(
+            type_events("select ", caret(7), typed(Key::Quote, none, "'")),
+            ("select ''".into(), caret(8))
+        );
+        assert_eq!(
+            type_events("select count", caret(12), typed(Key::Num9, shift, "(")),
+            ("select count()".into(), caret(13))
+        );
+        assert_eq!(
+            type_events("select ", caret(7), typed(Key::Backtick, none, "`")),
+            ("select ``".into(), caret(8))
+        );
+        // Typing the closer steps over it.
+        assert_eq!(
+            type_events("x = ''", caret(5), typed(Key::Quote, none, "'")),
+            ("x = ''".into(), caret(6))
+        );
+        assert_eq!(
+            type_events("count()", caret(6), typed(Key::Num0, shift, ")")),
+            ("count()".into(), caret(7))
+        );
+        // A selection is wrapped.
+        assert_eq!(
+            type_events(
+                "select a",
+                Selection::new(7, 8),
+                typed(Key::Num9, shift, "(")
+            ),
+            ("select (a)".into(), Selection::new(8, 9))
+        );
+        // Backspace between an empty pair deletes both.
+        assert_eq!(
+            type_events("f()", caret(2), vec![key(Key::Backspace, none)]),
+            ("f".into(), caret(1))
+        );
+        // A caret move first in the frame leaves the character to the text editor.
+        let mut moved = vec![key(Key::ArrowLeft, none)];
+        moved.extend(typed(Key::Quote, none, "'"));
+        assert_eq!(
+            type_events("select ", caret(7), moved),
+            ("select ".into(), caret(7))
+        );
+    }
+
+    #[test]
+    fn printable_key_presses_are_not_edits() {
+        assert!(!key_edits(Key::Quote, Modifiers::NONE));
+        assert!(!key_edits(Key::Num9, Modifiers::SHIFT));
+        assert!(!key_edits(Key::A, Modifiers::SHIFT));
+        assert!(key_edits(Key::Backspace, Modifiers::NONE));
+        assert!(key_edits(Key::ArrowLeft, Modifiers::SHIFT));
+        assert!(key_edits(Key::Z, Modifiers::COMMAND));
     }
 
     #[test]

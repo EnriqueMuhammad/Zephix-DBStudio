@@ -266,6 +266,12 @@ pub enum Command {
     /// The worker sends this on a timer. A query that holds the session is left alone.
     /// SQLite answers with a local `SELECT 1` (there is no server idle timeout).
     ProbeSessions,
+    /// Fetch the latest stable release from GitHub (Help > Check for updates, and once at
+    /// start-up unless turned off). Answered with [`Event::UpdateChecked`].
+    CheckForUpdates {
+        /// Asked for from the menu (the UI reports "up to date" and errors), not at start-up.
+        manual: bool,
+    },
 }
 
 /// Events sent from the worker to the UI.
@@ -465,5 +471,13 @@ pub enum Event {
         request_id: RequestId,
         /// Outcome.
         result: Result<String, DbError>,
+    },
+    /// Answer to [`Command::CheckForUpdates`]: the highest stable `vX.Y.Z` release, `None`
+    /// when there is none, or why the check failed (one sentence).
+    UpdateChecked {
+        /// Copied from the command.
+        manual: bool,
+        /// Latest release, whatever its version; the UI compares it with its own.
+        result: Result<Option<crate::update::Release>, String>,
     },
 }

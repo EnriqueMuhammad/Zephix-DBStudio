@@ -194,6 +194,8 @@ pub struct StudioApp {
     backups: crate::model::BackupState,
     /// Reconnect in flight, including one that is waiting for a password or a retry.
     reconnect: Option<ReconnectIntent>,
+    /// Update check: menu, start-up toast and status-bar notice.
+    update: crate::update::UpdateState,
 }
 
 /// A reconnect the user asked for. Kept until the worker reports success or failure so a
@@ -292,6 +294,16 @@ impl StudioApp {
         let script_dir: Option<std::path::PathBuf> = cc
             .storage
             .and_then(|s| eframe::get_value(s, crate::scripts::SCRIPT_DIR_KEY));
+        let update = crate::update::UpdateState::new(
+            cc.storage
+                .and_then(|s| eframe::get_value(s, crate::update::CHECK_ON_START_KEY))
+                .unwrap_or(true),
+            cc.storage
+                .and_then(|s| {
+                    eframe::get_value::<Option<String>>(s, crate::update::SKIPPED_VERSION_KEY)
+                })
+                .flatten(),
+        );
 
         Ok(Self {
             window_fit: crate::window::WindowFit::default(),
@@ -323,11 +335,27 @@ impl StudioApp {
                 ..crate::model::BackupState::default()
             },
             reconnect: None,
+            update,
         })
         .map(|mut app| {
             app.reload_history();
+            if app.update.check_on_start {
+                app.check_for_updates(false);
+            }
             app
         })
+    }
+
+    /// Asks the worker for the latest release; the answer is [`Event::UpdateChecked`].
+    fn check_for_updates(&mut self, manual: bool) {
+        if self.update.is_checking() {
+            if manual {
+                self.update.started(true);
+            }
+            return;
+        }
+        self.update.started(manual);
+        self.services.send(Command::CheckForUpdates { manual });
     }
 
     /// Re-reads history for the current filter.
@@ -751,6 +779,7 @@ impl StudioApp {
                     };
                 }
             }
+            Event::UpdateChecked { manual, result } => self.update.finished(manual, result),
         }
     }
 
@@ -890,6 +919,7 @@ impl StudioApp {
         if self.dialog.is_some()
             || self.confirm.is_some()
             || self.show_about
+            || self.update.dialog_open()
             || self.prompt.is_some()
             || self.exec.is_some()
             || !self.scripts.close_queue.is_empty()
@@ -2241,6 +2271,11 @@ impl StudioApp {
                 {
                     self.workspace.show_welcome();
                 }
+                ui.separator();
+                if let Some(crate::update::UpdateAction::CheckNow) = self.update.menu(ui) {
+                    self.check_for_updates(true);
+                }
+                ui.separator();
                 if ui
                     .button(format!(
                         "{}  About {}",
@@ -2539,7 +2574,7 @@ impl StudioApp {
         });
     }
 
-    fn status_bar(&self, ui: &mut Ui) {
+    fn status_bar(&mut self, ui: &mut Ui) {
         ui.horizontal_centered(|ui| {
             // The summary on the right gets its room first; the message takes what is left.
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -2563,6 +2598,7 @@ impl StudioApp {
                     .color(color::text_faint()),
                 );
                 ui.add_space(16.0);
+                self.update.status_item(ui);
                 ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                     let Some(msg) = &self.status else {
                         ui.label(RichText::new("Ready").size(12.0).color(color::text_dim()));
@@ -3249,6 +3285,10 @@ impl eframe::App for StudioApp {
         self.show_close_prompt(&ctx);
         self.show_quit_prompt(&ctx);
         self.about_modal(&ctx);
+        if let Some(crate::update::UpdateAction::CheckNow) = self.update.dialog(&ctx) {
+            self.check_for_updates(true);
+        }
+        self.update.toast(&ctx);
         self.apply(actions);
     }
 
@@ -3260,6 +3300,16 @@ impl eframe::App for StudioApp {
         };
         eframe::set_value(storage, key, &self.workspace);
         eframe::set_value(storage, LIGHT_THEME_KEY, &theme::is_light());
+        eframe::set_value(
+            storage,
+            crate::update::CHECK_ON_START_KEY,
+            &self.update.check_on_start,
+        );
+        eframe::set_value(
+            storage,
+            crate::update::SKIPPED_VERSION_KEY,
+            &self.update.skipped,
+        );
         if let Some(dir) = &self.scripts.last_dir {
             eframe::set_value(storage, crate::scripts::SCRIPT_DIR_KEY, dir);
         }
