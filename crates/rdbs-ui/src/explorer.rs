@@ -27,6 +27,9 @@ pub struct ExplorerState {
     pub selected_object: Option<ObjectRef>,
     /// Profile of the selected node.
     pub selected_profile: Option<ProfileId>,
+    /// Database of the selected node (the node itself, or the one it belongs to), so a new
+    /// query tab runs there. `None` for a connection node.
+    pub selected_database: Option<String>,
     /// Request keyboard focus for the filter box next frame.
     pub focus_filter: bool,
     /// Name filters of folders (Tables, Procedures, ...) by node key, as typed.
@@ -78,7 +81,7 @@ pub fn show(ui: &mut Ui, state: &mut ExplorerState, cx: &mut ExplorerContext<'_>
             }
             if ui
                 .small_button(icon::ARROWS_CLOCKWISE)
-                .on_hover_text("Refresh selected connection (F5)")
+                .on_hover_text("Refresh selected connection (F5 when no query tab is active)")
                 .clicked()
                 && let Some(id) = state.selected_profile
             {
@@ -273,6 +276,7 @@ fn profile_node(
     if response.clicked() {
         state.selected = Some(key.clone());
         state.selected_profile = Some(profile.id);
+        state.selected_database = None;
         state.selected_object = None;
     }
     let wants_open = toggled || response.double_clicked();
@@ -296,6 +300,7 @@ fn profile_node(
     response.context_menu(|ui| {
         state.selected = Some(key.clone());
         state.selected_profile = Some(profile.id);
+        state.selected_database = None;
         profile_menu(ui, profile, connected, cx.actions);
     });
 
@@ -321,7 +326,7 @@ fn profile_node(
                 hint_row(
                     ui,
                     1,
-                    "No objects loaded (F5 refreshes)",
+                    "No objects loaded (Refresh loads them)",
                     color::text_faint(),
                 );
             }
@@ -373,6 +378,7 @@ fn profile_menu(
     {
         actions.push(UiAction::NewQuery {
             profile_id: Some(profile.id),
+            database: None,
             sql: None,
             title: None,
             run: false,
@@ -542,6 +548,7 @@ fn object_node(
     if response.clicked() || response.secondary_clicked() {
         state.selected = Some(key.clone());
         state.selected_profile = Some(path.profile_id);
+        state.selected_database = here.database.clone();
         state.selected_object = object_ref.clone();
     }
     // Double-click opens tables, views, routines and Agent job history.
@@ -984,8 +991,15 @@ fn object_menu(
         .button(format!("{}  New Query", icon::FILE_SQL))
         .clicked()
     {
+        // From a database or anything inside one, the tab runs in that database.
+        let database = if obj.kind == ObjectKind::Database {
+            Some(obj.name.clone())
+        } else {
+            path.database.clone()
+        };
         actions.push(UiAction::NewQuery {
             profile_id: Some(path.profile_id),
+            database,
             sql: None,
             title: None,
             run: false,

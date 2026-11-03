@@ -478,6 +478,18 @@ pub fn toggle_comment(text: &str, sel: Selection, comment: bool) -> Option<Edit>
     }))
 }
 
+/// Toggle Line Comment (Ctrl+/): uncomments when every non-blank touched line starts with
+/// `--`, comments them otherwise.
+pub fn toggle_line_comment(text: &str, sel: Selection) -> Option<Edit> {
+    let chars: Vec<char> = text.chars().collect();
+    let block = line_block(&chars, sel);
+    let all_commented = block_lines(&chars, &block)
+        .iter()
+        .filter(|l| !l.trim().is_empty())
+        .all(|l| l.trim_start().starts_with("--"));
+    toggle_comment(text, sel, !all_commented)
+}
+
 /// Increase (`increase`) or Decrease Line Indent of the touched non-blank lines by one tab
 /// (decreasing also removes up to [`TAB_WIDTH`] spaces).
 pub fn indent_lines(text: &str, sel: Selection, increase: bool) -> Option<Edit> {
@@ -796,6 +808,75 @@ mod tests {
         let e = toggle_comment("select 1", caret(3), true).unwrap();
         assert_eq!((e.text.as_str(), e.selection), ("--select 1", caret(5)));
         assert!(toggle_comment("select 1", caret(0), false).is_none());
+    }
+
+    #[test]
+    fn toggles_line_comments() {
+        // Uncommented lines get commented, at the smallest indentation.
+        let e = toggle_line_comment(
+            "select 1
+  from t",
+            Selection::new(0, 12),
+        )
+        .unwrap();
+        assert_eq!(
+            e.text,
+            "--select 1
+--  from t"
+        );
+        let e = toggle_line_comment(
+            "  a
+    b",
+            Selection::new(0, 6),
+        )
+        .unwrap();
+        assert_eq!(
+            e.text,
+            "  --a
+  --  b"
+        );
+        // All commented: uncomment.
+        let e = toggle_line_comment(
+            "--select 1
+--  from t",
+            Selection::new(0, 14),
+        )
+        .unwrap();
+        assert_eq!(
+            e.text,
+            "select 1
+  from t"
+        );
+        // A mix comments every line; blank lines are left alone.
+        let e = toggle_line_comment(
+            "--a
+
+b",
+            Selection::new(0, 6),
+        )
+        .unwrap();
+        assert_eq!(
+            e.text,
+            "----a
+
+--b"
+        );
+        // The caret line alone, caret kept after the inserted marker.
+        let e = toggle_line_comment(
+            "a
+select 1",
+            caret(4),
+        )
+        .unwrap();
+        assert_eq!(
+            (e.text.as_str(), e.selection),
+            (
+                "a
+--select 1",
+                caret(6)
+            )
+        );
+        assert!(toggle_line_comment("   ", caret(1)).is_none());
     }
 
     #[test]

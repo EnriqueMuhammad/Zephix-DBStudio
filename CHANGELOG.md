@@ -14,6 +14,20 @@ and the project uses [Semantic Versioning](https://semver.org/).
   available** item in the status bar point to it. **Skip This Version** silences both until a
   later release. The start-up check can be turned off in the Help menu or the update dialog.
 - Backticks close themselves in the SQL editor like quotes and brackets.
+- **Ctrl+/** (Cmd+/ on macOS) toggles line comments: it comments the selected lines, or
+  uncomments them when all of them are commented. Also in the Edit menu as **Toggle Line
+  Comment**.
+- **F5** runs the active query tab (the selection if there is one). With no query tab active
+  it still refreshes the selected connection.
+- **Save as Excel…** in a result's export menu writes an `.xlsx` workbook. Numbers, booleans
+  and dates become Excel values; decimals with more than 15 digits, very large integers and
+  dates with a time zone stay text so nothing is rounded. The header row is bold, frozen and
+  has filters.
+- **New Query** opens in the database you picked. From a database in the explorer (or a table
+  or schema inside it), the new tab runs in that database, and **File > New Query** (Ctrl+T)
+  uses the database selected in the explorer.
+- **View > Theme > Follow System** switches between the light and dark theme with the
+  operating system. Dark and Light are still there.
 
 ### Fixed
 

@@ -13,8 +13,9 @@ pub const SHORTCUTS: &[(&str, &str)] = &[
     ("Ctrl+N", "New connection"),
     ("Ctrl+T", "New query tab"),
     ("Ctrl+O / Ctrl+S", "Open / save a query file"),
-    ("Ctrl+Enter / Ctrl+R", "Run query or selection"),
+    ("Ctrl+Enter / Ctrl+R / F5", "Run query or selection"),
     ("Ctrl+Space", "Autocomplete"),
+    ("Ctrl+/", "Toggle line comment"),
     ("Ctrl+K, Ctrl+C / Ctrl+U", "Comment / uncomment lines"),
     ("Ctrl+E, Ctrl+W", "Toggle word wrap"),
     ("Alt+Up / Alt+Down", "Move lines"),
@@ -22,7 +23,7 @@ pub const SHORTCUTS: &[(&str, &str)] = &[
     ("Ctrl+Shift+W", "Close all tabs"),
     ("Ctrl+B", "Toggle sidebar"),
     ("Ctrl+F", "Filter explorer"),
-    ("F5", "Refresh selected connection"),
+    ("F5 (no query tab open)", "Refresh selected connection"),
 ];
 
 /// Renders the welcome tab.
@@ -76,6 +77,7 @@ pub fn show(ui: &mut Ui, cx: &mut TabContext<'_>) {
                     {
                         cx.actions.push(UiAction::NewQuery {
                             profile_id: cx.profiles.first().map(|p| p.id),
+                            database: None,
                             sql: None,
                             title: None,
                             run: false,
@@ -109,6 +111,7 @@ pub fn show(ui: &mut Ui, cx: &mut TabContext<'_>) {
                                         cx.actions.push(UiAction::Connect(p.id));
                                         cx.actions.push(UiAction::NewQuery {
                                             profile_id: Some(p.id),
+                                            database: None,
                                             sql: None,
                                             title: None,
                                             run: false,

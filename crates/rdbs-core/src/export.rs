@@ -58,6 +58,10 @@ fn csv_field(text: &str) -> String {
 }
 
 /// Text of a cell for CSV: NULL is an empty field, binary is `0x…` hex.
+pub fn plain_text(value: &CellValue) -> String {
+    plain(value)
+}
+
 fn plain(value: &CellValue) -> String {
     match value {
         CellValue::Null => String::new(),

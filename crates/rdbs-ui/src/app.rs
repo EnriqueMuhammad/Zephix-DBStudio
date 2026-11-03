@@ -34,8 +34,10 @@ const REFRESHING: &str = "Refreshing objects…";
 /// Storage key of the persisted [`Workspace`] (separate keys keep demo tabs out of live mode).
 const WORKSPACE_KEY: &str = "rdbs.workspace";
 const DEMO_WORKSPACE_KEY: &str = "rdbs.workspace.demo";
-/// Persisted theme choice (`true` = light).
+/// Persisted theme choice of 0.3.2 and earlier (`true` = light), still written for them.
 const LIGHT_THEME_KEY: &str = "rdbs.light_theme";
+/// Persisted [`theme::ThemeMode`].
+const THEME_MODE_KEY: &str = "rdbs.theme_mode";
 
 const SC_NEW_CONNECTION: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::N);
 const SC_NEW_QUERY: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::T);
@@ -50,7 +52,8 @@ const SC_SIDEBAR: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, K
 const SC_FILTER: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::F);
 const SC_RUN: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Enter);
 const SC_RUN_ALT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::R);
-const SC_REFRESH: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::F5);
+/// Runs the active query tab; with no query tab active it refreshes the selected connection.
+const SC_F5: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::F5);
 
 /// Error type returned while creating the app.
 pub type InitError = Box<dyn std::error::Error + Send + Sync>;
@@ -240,11 +243,21 @@ impl StudioApp {
     /// Creates the app: applies the theme, starts the worker, opens local storage and restores
     /// the persisted workspace.
     pub fn new(cc: &eframe::CreationContext<'_>, config: AppConfig) -> Result<Self, InitError> {
-        let light = cc
+        let mode = cc
             .storage
-            .and_then(|s| eframe::get_value::<bool>(s, LIGHT_THEME_KEY))
-            .unwrap_or(false);
-        theme::apply(&cc.egui_ctx, light);
+            .and_then(|s| {
+                eframe::get_value::<theme::ThemeMode>(s, THEME_MODE_KEY).or_else(|| {
+                    eframe::get_value::<bool>(s, LIGHT_THEME_KEY).map(|light| {
+                        if light {
+                            theme::ThemeMode::Light
+                        } else {
+                            theme::ThemeMode::Dark
+                        }
+                    })
+                })
+            })
+            .unwrap_or_default();
+        theme::apply(&cc.egui_ctx, mode);
 
         let repaint_ctx = cc.egui_ctx.clone();
         let services =
@@ -942,8 +955,10 @@ impl StudioApp {
         let close_tab = pressed(&SC_CLOSE_TAB);
         let sidebar = pressed(&SC_SIDEBAR);
         let filter = pressed(&SC_FILTER);
-        let run = pressed(&SC_RUN) | pressed(&SC_RUN_ALT);
-        let refresh = pressed(&SC_REFRESH);
+        let f5 = pressed(&SC_F5);
+        let f5_runs = f5 && self.workspace.active_query_tab().is_some();
+        let run = pressed(&SC_RUN) | pressed(&SC_RUN_ALT) | f5_runs;
+        let refresh = f5 && !f5_runs;
 
         if new_connection {
             actions.push(UiAction::NewConnection);
@@ -960,6 +975,7 @@ impl StudioApp {
         if new_query {
             actions.push(UiAction::NewQuery {
                 profile_id: None,
+                database: None,
                 sql: None,
                 title: None,
                 run: false,
@@ -1276,14 +1292,25 @@ impl StudioApp {
             match action {
                 UiAction::NewQuery {
                     profile_id,
+                    database,
                     sql,
                     title,
                     run,
                 } => {
-                    let profile_id = profile_id.or(self.explorer.selected_profile);
+                    let (profile_id, database) = match profile_id {
+                        Some(id) => (Some(id), database),
+                        None => (
+                            self.explorer.selected_profile,
+                            self.explorer.selected_database.clone(),
+                        ),
+                    };
+                    let database = profile_id.and_then(|id| self.tab_database(id, database));
                     let id =
                         self.workspace
                             .open_query_tab(profile_id, sql.unwrap_or_default(), title);
+                    if let Some(q) = self.workspace.query_tab_mut(id) {
+                        q.database = database;
+                    }
                     if run {
                         let follow_up = self.run_tab(id);
                         self.apply(follow_up);
@@ -1331,6 +1358,7 @@ impl StudioApp {
                 UiAction::ViewJobHistory(obj) => {
                     self.apply(vec![UiAction::NewQuery {
                         profile_id: Some(obj.profile_id),
+                        database: None,
                         sql: Some(rdbs_core::agent::history_sql(&obj.name)),
                         title: Some(format!("History · {}", obj.name)),
                         run: true,
@@ -1492,6 +1520,11 @@ impl StudioApp {
                     file_name,
                     format,
                 } => self.save_export(contents, file_name, format),
+                UiAction::SaveExcel {
+                    result,
+                    file_name,
+                    sheet,
+                } => self.save_excel(result, file_name, sheet),
                 UiAction::Status(message) => self.status = Some(message),
                 UiAction::ToggleSidebar => {
                     self.workspace.sidebar_visible = !self.workspace.sidebar_visible;
@@ -1644,6 +1677,27 @@ impl StudioApp {
                     .and_then(|c| c.default_database.as_ref())
                     != Some(db)
         })
+    }
+
+    /// Database override of a new query tab for `database` picked in the explorer. `None`
+    /// for the connection's own database, and for engines whose explorer databases are not
+    /// separate sessions (SQLite's `main`, Oracle's service, Redis' numbered databases).
+    fn tab_database(&self, profile_id: ProfileId, database: Option<String>) -> Option<String> {
+        use rdbs_core::DatabaseKind as K;
+        let profile = self.profile(profile_id)?;
+        if !matches!(
+            profile.kind,
+            K::SqlServer | K::PostgreSql | K::MySql | K::MariaDb | K::MongoDb
+        ) {
+            return None;
+        }
+        let default = self
+            .connections
+            .get(&profile_id)
+            .and_then(|c| c.default_database.as_ref());
+        profile
+            .session_database(database)
+            .filter(|db| Some(db) != default)
     }
 
     /// Opens the rows of a table or view in a data tab (or focuses the one already open).
@@ -1996,6 +2050,42 @@ impl StudioApp {
         }
     }
 
+    /// Asks for a file name, then builds the workbook and writes it, all on a helper thread:
+    /// a large result takes a moment to encode.
+    fn save_excel(&mut self, result: rdbs_core::ResultSet, file_name: String, sheet: String) {
+        let tx = self.export_tx.clone();
+        let ctx = self.egui_ctx.clone();
+        let spawned = std::thread::Builder::new()
+            .name("rdbs-export".into())
+            .spawn(move || {
+                let Some(path) = rfd::FileDialog::new()
+                    .set_file_name(&file_name)
+                    .add_filter("Excel workbook", &["xlsx"])
+                    .save_file()
+                else {
+                    return;
+                };
+                let message = match rdbs_transfer::xlsx::result_to_xlsx(&result, &sheet) {
+                    Ok(bytes) => match std::fs::write(&path, bytes) {
+                        Ok(()) => StatusMessage::info(format!(
+                            "Exported {} rows to {}",
+                            crate::widgets::format_count(result.rows.len() as u64),
+                            path.display()
+                        )),
+                        Err(e) => {
+                            StatusMessage::error(format!("Could not write {}: {e}", path.display()))
+                        }
+                    },
+                    Err(e) => StatusMessage::error(e),
+                };
+                let _ = tx.send(message);
+                ctx.request_repaint();
+            });
+        if let Err(e) = spawned {
+            self.status = Some(StatusMessage::error(format!("Could not start export: {e}")));
+        }
+    }
+
     fn open_prompt(&mut self, profile_id: ProfileId, then: AfterPassword, reason: Option<String>) {
         self.prompt = Some(PasswordPrompt {
             profile_id,
@@ -2141,6 +2231,7 @@ impl StudioApp {
                 {
                     actions.push(UiAction::NewQuery {
                         profile_id: None,
+                        database: None,
                         sql: None,
                         title: None,
                         run: false,
@@ -2241,10 +2332,15 @@ impl StudioApp {
                     self.workspace.show_welcome();
                 }
                 ui.separator();
-                let mut light = theme::is_light();
-                if ui.checkbox(&mut light, "Light Theme").clicked() {
-                    theme::set_light(ui.ctx(), light);
-                }
+                ui.menu_button(format!("{}  Theme", icon::PALETTE), |ui| {
+                    let current = theme::mode();
+                    for (mode, label) in theme::ThemeMode::ALL {
+                        if ui.radio(current == mode, label).clicked() {
+                            theme::set_mode(ui.ctx(), mode);
+                            ui.close();
+                        }
+                    }
+                });
                 ui.separator();
                 if ui
                     .button(format!("{}  Reset Layout", icon::ARROWS_CLOCKWISE))
@@ -2289,11 +2385,14 @@ impl StudioApp {
             });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let light = theme::is_light();
-                let (glyph, tip) = if light {
-                    (icon::MOON, "Switch to the dark theme")
+                let (glyph, mut tip) = if light {
+                    (icon::MOON, "Switch to the dark theme".to_owned())
                 } else {
-                    (icon::SUN, "Switch to the light theme")
+                    (icon::SUN, "Switch to the light theme".to_owned())
                 };
+                if theme::mode() == theme::ThemeMode::System {
+                    tip.push_str(" (stops following the system; View > Theme)");
+                }
                 if ui
                     .add(Button::new(glyph).frame(false))
                     .on_hover_text(tip)
@@ -2482,6 +2581,7 @@ impl StudioApp {
             {
                 actions.push(UiAction::NewQuery {
                     profile_id: None,
+                    database: None,
                     sql: None,
                     title: None,
                     run: false,
@@ -2526,7 +2626,7 @@ impl StudioApp {
                     ToolbarButton::new(icon::ARROWS_CLOCKWISE, "Refresh")
                         .enabled(selected_profile.is_some()),
                 )
-                .on_hover_text("Refresh selected connection (F5)")
+                .on_hover_text("Refresh selected connection (F5 when no query tab is active)")
                 .clicked()
                 && let Some(id) = selected_profile
             {
@@ -3131,6 +3231,7 @@ fn empty_workspace(ui: &mut Ui, actions: &mut Vec<UiAction>) -> bool {
         if buttons.0 {
             actions.push(UiAction::NewQuery {
                 profile_id: None,
+                database: None,
                 sql: None,
                 title: None,
                 run: false,
@@ -3183,6 +3284,7 @@ fn dock_style(style: &mut egui_dock::Style) {
 impl eframe::App for StudioApp {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        theme::follow_system(&ctx);
         self.window_fit.update(&ctx);
         self.drain_events();
         self.tick_schedules(&ctx);
@@ -3300,6 +3402,7 @@ impl eframe::App for StudioApp {
         };
         eframe::set_value(storage, key, &self.workspace);
         eframe::set_value(storage, LIGHT_THEME_KEY, &theme::is_light());
+        eframe::set_value(storage, THEME_MODE_KEY, &theme::mode());
         eframe::set_value(
             storage,
             crate::update::CHECK_ON_START_KEY,
