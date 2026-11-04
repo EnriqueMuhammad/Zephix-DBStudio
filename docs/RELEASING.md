@@ -36,7 +36,7 @@ git tag vX.Y.Z
 git push origin vX.Y.Z
 ```
 
-`X.Y.Z` is the `[workspace.package]` version (`v0.3.2` for this release).
+`X.Y.Z` is the `[workspace.package]` version (`v0.4.0` for this release).
 
 `.github/workflows/release.yml` runs on a `v*` tag (and can be started by hand for an existing
 tag). On `windows-latest` it runs `scripts\release.ps1`: tests, a release build, the per-user MSI,
