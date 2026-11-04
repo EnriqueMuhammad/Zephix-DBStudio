@@ -996,6 +996,7 @@ impl TabViewer for TabContext<'_> {
     fn on_add(&mut self, _path: egui_dock::NodePath) {
         self.actions.push(UiAction::NewQuery {
             profile_id: None,
+            database: None,
             sql: None,
             title: None,
             run: false,

@@ -159,8 +159,9 @@ text says Ctrl.
 | Ctrl+T | New query tab |
 | Ctrl+O | Open a `.sql` file |
 | Ctrl+S / Ctrl+Shift+S | Save the query / save it under a new name |
-| Ctrl+Enter or Ctrl+R | Run the query, or the selection if there is one |
+| Ctrl+Enter, Ctrl+R or F5 | Run the query, or the selection if there is one |
 | Ctrl+Space | Autocomplete |
+| Ctrl+/ | Comment the selected lines, or uncomment them when all are commented |
 | Ctrl+K, Ctrl+C / Ctrl+K, Ctrl+U | Comment / uncomment the selected lines |
 | Ctrl+E, Ctrl+W | Toggle word wrap |
 | Alt+Up / Alt+Down | Move the selected lines |
@@ -168,7 +169,7 @@ text says Ctrl.
 | Ctrl+Shift+W | Close all tabs |
 | Ctrl+B | Toggle the sidebar |
 | Ctrl+F | Filter the explorer |
-| F5 | Refresh the selected connection |
+| F5 (when no query tab is active) | Refresh the selected connection |
 
 Help → Keyboard Shortcuts opens the welcome page.
 

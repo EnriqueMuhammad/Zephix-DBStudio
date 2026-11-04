@@ -116,6 +116,61 @@ pub const LIGHT: Palette = Palette {
 
 /// Whether the light theme is active.
 static LIGHT_MODE: AtomicBool = AtomicBool::new(false);
+/// Whether the theme follows the operating system ([`ThemeMode::System`]).
+static FOLLOW_SYSTEM: AtomicBool = AtomicBool::new(false);
+
+/// The theme the user picked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum ThemeMode {
+    /// Always dark.
+    #[default]
+    Dark,
+    /// Always light.
+    Light,
+    /// Light or dark as the operating system is set, switching when it changes.
+    System,
+}
+
+impl ThemeMode {
+    /// Every mode in menu order, with its label.
+    pub const ALL: [(ThemeMode, &'static str); 3] = [
+        (Self::Dark, "Dark"),
+        (Self::Light, "Light"),
+        (Self::System, "Follow System"),
+    ];
+}
+
+/// The theme mode in effect.
+pub fn mode() -> ThemeMode {
+    if FOLLOW_SYSTEM.load(Ordering::Relaxed) {
+        ThemeMode::System
+    } else if is_light() {
+        ThemeMode::Light
+    } else {
+        ThemeMode::Dark
+    }
+}
+
+/// Selects a theme mode.
+pub fn set_mode(ctx: &egui::Context, mode: ThemeMode) {
+    match mode {
+        ThemeMode::Dark => set_light(ctx, false),
+        ThemeMode::Light => set_light(ctx, true),
+        ThemeMode::System => {
+            FOLLOW_SYSTEM.store(true, Ordering::Relaxed);
+            ctx.set_theme(ThemePreference::System);
+            follow_system(ctx);
+        }
+    }
+}
+
+/// With [`ThemeMode::System`], picks up the operating system's current setting. Called at
+/// the start of every frame so the palette switches together with egui's visuals.
+pub fn follow_system(ctx: &egui::Context) {
+    if FOLLOW_SYSTEM.load(Ordering::Relaxed) {
+        LIGHT_MODE.store(ctx.theme() == Theme::Light, Ordering::Relaxed);
+    }
+}
 
 /// Whether the light theme is active.
 pub fn is_light() -> bool {
@@ -201,18 +256,19 @@ pub fn mono() -> FontId {
 }
 
 /// Applies fonts, both themes' visuals and spacing to the context, then selects a theme.
-pub fn apply(ctx: &egui::Context, light: bool) {
+pub fn apply(ctx: &egui::Context, mode: ThemeMode) {
     let mut fonts = egui::FontDefinitions::default();
     egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
     ctx.set_fonts(fonts);
 
     ctx.style_mut_of(Theme::Dark, |style| configure(style, &DARK, true));
     ctx.style_mut_of(Theme::Light, |style| configure(style, &LIGHT, false));
-    set_light(ctx, light);
+    set_mode(ctx, mode);
 }
 
-/// Switches between the light and the dark theme.
+/// Switches to the light or the dark theme (and stops following the system).
 pub fn set_light(ctx: &egui::Context, light: bool) {
+    FOLLOW_SYSTEM.store(false, Ordering::Relaxed);
     LIGHT_MODE.store(light, Ordering::Relaxed);
     ctx.set_theme(if light {
         ThemePreference::Light

@@ -142,7 +142,7 @@ fn toolbar(ui: &mut Ui, q: &mut QueryTab, cx: &mut TabContext<'_>) {
             Button::new(RichText::new(format!("{}  Run", icon::PLAY)).color(color::success()));
         if ui
             .add_enabled(!running, run)
-            .on_hover_text("Run (Ctrl+Enter). Runs only the selection when text is selected.")
+            .on_hover_text("Run (Ctrl+Enter or F5). Runs only the selection when text is selected.")
             .clicked()
         {
             request_run(q, cx);
@@ -757,7 +757,9 @@ fn shortcut_action(ui: &mut Ui, editor_id: Id, text: &str) -> Option<EditorActio
             return (None, Some(Chord::ShiftAltL));
         }
         let shift_ctrl_alt = ctrl_alt.plus(Modifiers::SHIFT);
-        let action = if take_key(i, ctrl_shift, Key::U) {
+        let action = if take_key(i, CTRL, Key::Slash) || take_key(i, ctrl_shift, Key::Slash) {
+            Some(A::ToggleComment)
+        } else if take_key(i, ctrl_shift, Key::U) {
             Some(A::Uppercase)
         } else if take_key(i, ctrl_shift, Key::L) {
             Some(A::Lowercase)
@@ -1018,6 +1020,7 @@ pub(crate) enum EditorAction {
     ExpandToLine,
     Comment,
     Uncomment,
+    ToggleComment,
     IncreaseIndent,
     DecreaseIndent,
 }
@@ -1110,6 +1113,16 @@ fn menu_entries() -> &'static [MenuEntry] {
             label: "Uncomment Selection",
             shortcut: "Ctrl+K, Ctrl+U",
             glyph: Fixed(icon::CHAT_CENTERED),
+            section: 2,
+            edit: true,
+            context_root: true,
+            needs_selection: false,
+        },
+        MenuEntry {
+            action: A::ToggleComment,
+            label: "Toggle Line Comment",
+            shortcut: "Ctrl+/",
+            glyph: Fixed(icon::CHAT_CENTERED_DOTS),
             section: 2,
             edit: true,
             context_root: true,
@@ -1284,7 +1297,7 @@ fn menu_entries() -> &'static [MenuEntry] {
         MenuEntry {
             action: A::Run,
             label: "Run",
-            shortcut: "Ctrl+Enter",
+            shortcut: "Ctrl+Enter / F5",
             glyph: Fixed(icon::PLAY),
             section: 4,
             edit: false,
@@ -1481,6 +1494,7 @@ pub(crate) fn apply_editor_action(
         A::JoinLines => textops::join_lines(text, sel),
         A::Comment => textops::toggle_comment(text, sel, true),
         A::Uncomment => textops::toggle_comment(text, sel, false),
+        A::ToggleComment => textops::toggle_line_comment(text, sel),
         A::IncreaseIndent => textops::indent_lines(text, sel, true),
         A::DecreaseIndent => textops::indent_lines(text, sel, false),
     };
@@ -2319,6 +2333,17 @@ fn export_menu(
                 format,
             });
         }
+    }
+    if ui
+        .button(format!("{}  Save as Excel…", icon::FILE_XLS))
+        .on_hover_text("An .xlsx workbook with numbers and dates as Excel values")
+        .clicked()
+    {
+        actions.push(UiAction::SaveExcel {
+            result: rs.clone(),
+            file_name: format!("{table}.xlsx"),
+            sheet: table.to_owned(),
+        });
     }
 }
 

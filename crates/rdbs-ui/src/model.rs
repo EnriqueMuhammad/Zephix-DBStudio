@@ -116,8 +116,11 @@ pub struct ObjectRef {
 pub enum UiAction {
     /// Open a new query tab.
     NewQuery {
-        /// Pre-selected connection.
+        /// Pre-selected connection; `None` takes the connection selected in the explorer.
         profile_id: Option<ProfileId>,
+        /// Database the tab runs in. With `profile_id: None` the database selected in the
+        /// explorer is used instead.
+        database: Option<String>,
         /// Initial SQL text.
         sql: Option<String>,
         /// Tab title override.
@@ -241,6 +244,16 @@ pub enum UiAction {
         file_name: String,
         /// Format, for the file-type filter.
         format: ExportFormat,
+    },
+    /// Ask where to save a result as an Excel workbook, then build and write it off the UI
+    /// thread.
+    SaveExcel {
+        /// The rows to export.
+        result: rdbs_core::ResultSet,
+        /// Suggested file name, including `.xlsx`.
+        file_name: String,
+        /// Worksheet name.
+        sheet: String,
     },
     /// Open (or focus) a tool tab.
     OpenTool(crate::tools::ToolLaunch),
