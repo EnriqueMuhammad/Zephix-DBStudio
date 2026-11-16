@@ -62,6 +62,8 @@ egui_extras = { version = "0.36" }
 egui_dock = { version = "0.21", features = ["serde"] }
 egui-phosphor = "0.14"
 rfd = "0.17"
+# UI tests (rdbs-ui/tests): AccessKit tree of a headless app, no GPU.
+egui_kittest = { version = "0.36", features = ["eframe"] }
 
 # Runtime / plumbing
 tokio = { version = "1.53", features = ["rt-multi-thread", "sync", "time", "macros"] }

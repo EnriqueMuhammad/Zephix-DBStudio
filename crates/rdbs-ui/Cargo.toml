@@ -26,5 +26,9 @@ directories.workspace = true
 tracing.workspace = true
 ron.workspace = true
 
+[dev-dependencies]
+egui_kittest.workspace = true
+rdbs-adapter-mock.workspace = true
+
 [lints]
 workspace = true
