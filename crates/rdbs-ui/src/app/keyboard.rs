@@ -8,6 +8,8 @@ impl StudioApp {
             || self.confirm.is_some()
             || self.show_about
             || self.update.dialog_open()
+            || self.ai.dialog_open()
+            || self.fonts.dialog_open()
             || self.prompt.is_some()
             || self.exec.is_some()
             || !self.scripts.close_queue.is_empty()
@@ -30,6 +32,13 @@ impl StudioApp {
         let close_tab = pressed(&SC_CLOSE_TAB);
         let sidebar = pressed(&SC_SIDEBAR);
         let filter = pressed(&SC_FILTER);
+        let replace = pressed(&SC_REPLACE);
+        // Before F3, which would also match Shift+F3.
+        let find_previous = pressed(&SC_FIND_PREVIOUS);
+        let find_next = pressed(&SC_FIND_NEXT);
+        if pressed(&SC_AI_PANEL) {
+            self.ai.toggle();
+        }
         let f5 = pressed(&SC_F5);
         let f5_runs = f5 && self.workspace.active_query_tab().is_some();
         let run = pressed(&SC_RUN) | pressed(&SC_RUN_ALT) | f5_runs;
@@ -65,9 +74,27 @@ impl StudioApp {
         if sidebar {
             actions.push(UiAction::ToggleSidebar);
         }
-        if filter {
+        // Ctrl+F searches the script of the active query tab, else filters the explorer.
+        let editor_tab = self
+            .workspace
+            .active_query_tab()
+            .is_some_and(|q| q.data_view.is_none());
+        if filter && !editor_tab {
             self.workspace.sidebar_visible = true;
             self.explorer.focus_filter = true;
+        }
+        if editor_tab {
+            use editor::EditorAction as A;
+            for (pressed, action) in [
+                (filter, A::Find),
+                (replace, A::Replace),
+                (find_next, A::FindNext),
+                (find_previous, A::FindPrevious),
+            ] {
+                if pressed {
+                    self.apply_editor_menu(action, actions);
+                }
+            }
         }
         if run {
             self.run_active_tab(actions);

@@ -19,6 +19,8 @@ egui_extras.workspace = true
 egui_dock.workspace = true
 egui-phosphor.workspace = true
 rfd.workspace = true
+fontdb.workspace = true
+regex.workspace = true
 serde.workspace = true
 uuid.workspace = true
 chrono = { workspace = true, features = ["clock"] }

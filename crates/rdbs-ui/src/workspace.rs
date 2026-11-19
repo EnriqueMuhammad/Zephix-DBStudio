@@ -703,6 +703,8 @@ pub struct RunState {
     pub active_result: usize,
     /// Autocomplete popup state.
     pub autocomplete: crate::autocomplete::AutocompleteState,
+    /// Find and replace bar of the editor.
+    pub find: crate::editor::FindState,
     /// Grid edits not yet saved.
     pub edits: rdbs_core::edit::PendingEdits,
     /// Cell being edited inline.
@@ -1081,7 +1083,7 @@ fn session_title(cx: &TabContext<'_>, query: &QueryTab, shown: &str) -> WidgetTe
     let font = cx
         .button_font
         .clone()
-        .unwrap_or_else(|| FontId::proportional(13.5));
+        .unwrap_or_else(|| crate::theme::ui_font(13.5));
     let (link, _) = query_link(cx, query);
     let mut job = LayoutJob::default();
     job.append(

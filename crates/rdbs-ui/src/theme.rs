@@ -1,6 +1,6 @@
 //! Dark and light themes: palettes, typography, spacing and widget visuals.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use egui::{
     Color32, CornerRadius, FontFamily, FontId, Margin, Stroke, TextStyle, Theme, ThemePreference,
@@ -247,22 +247,253 @@ pub mod color {
     );
 }
 
-/// Font size used by the SQL editor and data grid.
-pub const MONO_SIZE: f32 = 13.0;
+/// Font family of the results grid. It falls back to the interface fonts.
+pub const GRID_FAMILY: &str = "grid";
+/// Body text size (px) the fixed sizes in the UI code were designed for.
+const BASE_UI_PX: f32 = 13.5;
 
-/// Monospace font for code and data.
+/// Text sizes in effect (px, as `f32` bits): interface body, editor, results grid.
+static UI_PX: AtomicU32 = AtomicU32::new(13.5_f32.to_bits());
+static EDITOR_PX: AtomicU32 = AtomicU32::new(13.0_f32.to_bits());
+static GRID_PX: AtomicU32 = AtomicU32::new(13.0_f32.to_bits());
+
+fn px(size: &AtomicU32) -> f32 {
+    f32::from_bits(size.load(Ordering::Relaxed))
+}
+
+/// Typographic points to egui points (96 dpi: 10 pt = 13.3).
+pub fn pt_to_px(pt: f32) -> f32 {
+    pt * 96.0 / 72.0
+}
+
+/// A size written for the default interface font, scaled to the chosen interface size.
+pub fn ui_px(base: f32) -> f32 {
+    base * px(&UI_PX) / BASE_UI_PX
+}
+
+/// Interface font at a size written for the default interface size.
+pub fn ui_font(base: f32) -> FontId {
+    FontId::proportional(ui_px(base))
+}
+
+/// Monospace font for code: the SQL editor, messages, DDL and plans.
 pub fn mono() -> FontId {
-    FontId::new(MONO_SIZE, FontFamily::Monospace)
+    FontId::new(px(&EDITOR_PX), FontFamily::Monospace)
+}
+
+/// Font of the results grid cells and headers.
+pub fn grid_font() -> FontId {
+    FontId::new(px(&GRID_PX), FontFamily::Name(GRID_FAMILY.into()))
+}
+
+/// Monospace text in the grid (row numbers), at the grid size.
+pub fn grid_mono() -> FontId {
+    FontId::new(px(&GRID_PX), FontFamily::Monospace)
+}
+
+/// Height of an explorer row for the interface size (22 at the default size).
+pub fn row_height() -> f32 {
+    (ui_px(13.0) + 9.0).max(22.0).round()
+}
+
+/// Height of a grid row for the grid size (22 at the default size).
+pub fn grid_row_height() -> f32 {
+    (px(&GRID_PX) + 9.0).max(22.0).round()
+}
+
+/// One of the three places whose font can be chosen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FontTarget {
+    /// Menus, dialogs, explorer, tabs.
+    Interface,
+    /// SQL editor, messages and other code.
+    Editor,
+    /// Result grid cells and headers.
+    Grid,
+}
+
+impl FontTarget {
+    /// Every target in the order the font dialog lists them.
+    pub const ALL: [FontTarget; 3] = [FontTarget::Interface, FontTarget::Editor, FontTarget::Grid];
+
+    /// Label in the font dialog.
+    pub fn label(self) -> &'static str {
+        match self {
+            FontTarget::Interface => "Environment (menus, dialogs, explorer)",
+            FontTarget::Editor => "Text Editor (SQL, messages)",
+            FontTarget::Grid => "Grid Results",
+        }
+    }
+}
+
+/// A font family (`None` = the built-in font) and a size in typographic points.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct FontChoice {
+    /// Installed family name, e.g. "Segoe UI".
+    pub family: Option<String>,
+    /// Size in points (pt), as in other desktop apps.
+    pub size_pt: f32,
+}
+
+/// Fonts of the interface, the editor and the results grid. Persisted in `app.ron`.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct FontSettings {
+    /// Menus, dialogs, explorer and tabs.
+    pub interface: FontChoice,
+    /// SQL editor and other code.
+    pub editor: FontChoice,
+    /// Results grid.
+    pub grid: FontChoice,
+}
+
+/// Smallest and largest size offered (pt).
+pub const FONT_PT_RANGE: std::ops::RangeInclusive<f32> = 7.0..=28.0;
+
+impl Default for FontSettings {
+    /// Desktop-IDE defaults: the system UI font at 10 pt and a fixed-width editor font at
+    /// 10 pt. Missing families fall back to the built-in fonts.
+    fn default() -> Self {
+        let (ui, code) = if cfg!(windows) {
+            (Some("Segoe UI"), Some("Consolas"))
+        } else if cfg!(target_os = "macos") {
+            (None, Some("Menlo"))
+        } else {
+            (None, None)
+        };
+        let choice = |family: Option<&str>| FontChoice {
+            family: family.map(str::to_owned),
+            size_pt: 10.0,
+        };
+        Self {
+            interface: choice(ui),
+            editor: choice(code),
+            grid: choice(ui),
+        }
+    }
+}
+
+impl FontSettings {
+    /// The choice for one target.
+    pub fn get(&self, target: FontTarget) -> &FontChoice {
+        match target {
+            FontTarget::Interface => &self.interface,
+            FontTarget::Editor => &self.editor,
+            FontTarget::Grid => &self.grid,
+        }
+    }
+
+    /// The choice for one target, to change it.
+    pub fn get_mut(&mut self, target: FontTarget) -> &mut FontChoice {
+        match target {
+            FontTarget::Interface => &mut self.interface,
+            FontTarget::Editor => &mut self.editor,
+            FontTarget::Grid => &mut self.grid,
+        }
+    }
+
+    /// Sizes clamped to [`FONT_PT_RANGE`] (a hand-edited `app.ron` cannot break the layout).
+    #[must_use]
+    pub fn sanitized(mut self) -> Self {
+        for target in FontTarget::ALL {
+            let c = self.get_mut(target);
+            c.size_pt = if c.size_pt.is_finite() {
+                c.size_pt
+                    .clamp(*FONT_PT_RANGE.start(), *FONT_PT_RANGE.end())
+            } else {
+                10.0
+            };
+            if c.family.as_deref().is_some_and(|f| f.trim().is_empty()) {
+                c.family = None;
+            }
+        }
+        self
+    }
+}
+
+/// Font definitions: the built-in fonts and icons, with the chosen installed families in
+/// front. `load` returns a family's font file and face index, or `None` when it is missing.
+pub fn font_definitions(
+    settings: &FontSettings,
+    load: impl Fn(&str) -> Option<(Vec<u8>, u32)>,
+) -> egui::FontDefinitions {
+    let mut fonts = egui::FontDefinitions::default();
+    egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
+    let add = |fonts: &mut egui::FontDefinitions, choice: &FontChoice| -> Option<String> {
+        let family = choice.family.as_deref()?;
+        let key = format!("system:{family}");
+        if !fonts.font_data.contains_key(&key) {
+            let (bytes, index) = load(family)?;
+            let mut data = egui::FontData::from_owned(bytes);
+            data.index = index;
+            fonts
+                .font_data
+                .insert(key.clone(), std::sync::Arc::new(data));
+        }
+        Some(key)
+    };
+    let ui = add(&mut fonts, &settings.interface);
+    let code = add(&mut fonts, &settings.editor);
+    let grid = add(&mut fonts, &settings.grid);
+    let proportional = fonts.families.entry(FontFamily::Proportional).or_default();
+    if let Some(key) = &ui {
+        proportional.insert(0, key.clone());
+    }
+    let mut grid_list = proportional.clone();
+    if let Some(key) = grid {
+        grid_list.retain(|k| *k != key);
+        grid_list.insert(0, key);
+    }
+    fonts
+        .families
+        .insert(FontFamily::Name(GRID_FAMILY.into()), grid_list);
+    if let Some(key) = code {
+        fonts
+            .families
+            .entry(FontFamily::Monospace)
+            .or_default()
+            .insert(0, key);
+    }
+    fonts
+}
+
+/// Applies the sizes of `settings` to both themes (fonts themselves: [`font_definitions`]).
+pub fn apply_font_sizes(ctx: &egui::Context, settings: &FontSettings) {
+    let s = settings.clone().sanitized();
+    UI_PX.store(
+        (pt_to_px(s.interface.size_pt) * BASE_UI_PX / pt_to_px(10.0)).to_bits(),
+        Ordering::Relaxed,
+    );
+    EDITOR_PX.store(pt_to_px(s.editor.size_pt).to_bits(), Ordering::Relaxed);
+    GRID_PX.store(pt_to_px(s.grid.size_pt).to_bits(), Ordering::Relaxed);
+    for theme in [Theme::Dark, Theme::Light] {
+        ctx.style_mut_of(theme, text_styles);
+    }
+}
+
+/// Text styles and the row height of widgets for the current sizes.
+fn text_styles(style: &mut egui::Style) {
+    use FontFamily::Proportional;
+    style.text_styles = [
+        (TextStyle::Small, FontId::new(ui_px(11.0), Proportional)),
+        (TextStyle::Body, FontId::new(ui_px(13.5), Proportional)),
+        (TextStyle::Button, FontId::new(ui_px(13.5), Proportional)),
+        (TextStyle::Heading, FontId::new(ui_px(18.0), Proportional)),
+        (TextStyle::Monospace, mono()),
+    ]
+    .into();
+    style.spacing.interact_size.y = (ui_px(13.5) + 8.5).max(22.0).round();
 }
 
 /// Applies fonts, both themes' visuals and spacing to the context, then selects a theme.
-pub fn apply(ctx: &egui::Context, mode: ThemeMode) {
-    let mut fonts = egui::FontDefinitions::default();
-    egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
-    ctx.set_fonts(fonts);
-
+///
+/// Only the built-in fonts are loaded here; installed families come later with
+/// [`font_definitions`], once the system font list has been read off the UI thread.
+pub fn apply(ctx: &egui::Context, mode: ThemeMode, fonts: &FontSettings) {
+    ctx.set_fonts(font_definitions(fonts, |_| None));
     ctx.style_mut_of(Theme::Dark, |style| configure(style, &DARK, true));
     ctx.style_mut_of(Theme::Light, |style| configure(style, &LIGHT, false));
+    apply_font_sizes(ctx, fonts);
     set_mode(ctx, mode);
 }
 
@@ -280,20 +511,12 @@ pub fn set_light(ctx: &egui::Context, light: bool) {
 /// Typography, spacing and widget visuals of one theme.
 fn configure(style: &mut egui::Style, p: &Palette, dark: bool) {
     {
-        use FontFamily::{Monospace, Proportional};
-        style.text_styles = [
-            (TextStyle::Small, FontId::new(11.0, Proportional)),
-            (TextStyle::Body, FontId::new(13.5, Proportional)),
-            (TextStyle::Button, FontId::new(13.5, Proportional)),
-            (TextStyle::Heading, FontId::new(18.0, Proportional)),
-            (TextStyle::Monospace, FontId::new(MONO_SIZE, Monospace)),
-        ]
-        .into();
+        text_styles(style);
 
         let s = &mut style.spacing;
         s.item_spacing = Vec2::new(6.0, 4.0);
         s.button_padding = Vec2::new(8.0, 3.0);
-        s.interact_size.y = 22.0;
+        s.interact_size.y = s.interact_size.y.max(22.0);
         s.menu_margin = Margin::same(6);
         s.window_margin = Margin::same(12);
         s.indent = 14.0;

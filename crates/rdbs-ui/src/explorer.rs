@@ -11,7 +11,6 @@ use crate::model::{ConnState, ConnStatus, ObjectRef, UiAction};
 use crate::theme::{self, color};
 use crate::widgets;
 
-const ROW_HEIGHT: f32 = 22.0;
 const INDENT: f32 = 14.0;
 
 /// Explorer view state.
@@ -173,7 +172,7 @@ fn profile_node(
         let name = fit_label(
             ui,
             &profile.name,
-            FontId::proportional(13.5),
+            crate::theme::ui_font(13.5),
             text_color,
             name_width,
         );
@@ -191,7 +190,7 @@ fn profile_node(
                 egui::pos2(x, rect.center().y),
                 Align2::LEFT_CENTER,
                 profile.environment.short(),
-                FontId::proportional(9.5),
+                crate::theme::ui_font(9.5),
                 c,
             );
         }
@@ -214,7 +213,7 @@ fn profile_node(
                     right,
                     Align2::CENTER_CENTER,
                     icon::WARNING,
-                    FontId::proportional(13.0),
+                    crate::theme::ui_font(13.0),
                     color::danger(),
                 );
             }
@@ -470,13 +469,13 @@ fn object_node(
             egui::pos2(rect.left() + 8.0, rect.center().y),
             Align2::CENTER_CENTER,
             glyph,
-            FontId::proportional(14.0),
+            crate::theme::ui_font(14.0),
             glyph_color,
         );
         let name_x = rect.left() + 20.0;
         let available = (rect.right() - 4.0 - name_x).max(0.0);
-        let name_font = FontId::proportional(13.0);
-        let detail_font = FontId::proportional(11.0);
+        let name_font = crate::theme::ui_font(13.0);
+        let detail_font = crate::theme::ui_font(11.0);
         let filter_note = folder_filter.as_ref().map(|f| format!("filter: {f}"));
         let detail = filter_note
             .as_deref()
@@ -1066,13 +1065,15 @@ fn object_icon_dark(obj: &DbObject) -> (&'static str, Color32) {
 }
 
 fn hint_row(ui: &mut Ui, depth: usize, text: &str, c: Color32) {
-    let (rect, response) =
-        ui.allocate_exact_size(Vec2::new(ui.available_width(), ROW_HEIGHT), Sense::hover());
+    let (rect, response) = ui.allocate_exact_size(
+        Vec2::new(ui.available_width(), crate::theme::row_height()),
+        Sense::hover(),
+    );
     let x = rect.left() + 20.0 + depth as f32 * INDENT;
     let galley = fit_label(
         ui,
         text,
-        FontId::proportional(12.0),
+        crate::theme::ui_font(12.0),
         c,
         (rect.right() - 6.0 - x).max(0.0),
     );
@@ -1133,8 +1134,10 @@ impl TreeRow {
         } else {
             Sense::click()
         };
-        let (rect, response) =
-            ui.allocate_exact_size(Vec2::new(ui.available_width(), ROW_HEIGHT), sense);
+        let (rect, response) = ui.allocate_exact_size(
+            Vec2::new(ui.available_width(), crate::theme::row_height()),
+            sense,
+        );
         let painter = ui.painter();
         if self.selected {
             painter.rect_filled(rect, CornerRadius::same(3), color::selection());
@@ -1149,7 +1152,7 @@ impl TreeRow {
         let caret_x = rect.left() + 10.0 + self.depth as f32 * INDENT;
         let caret_rect = Rect::from_center_size(
             egui::pos2(caret_x, rect.center().y),
-            Vec2::new(16.0, ROW_HEIGHT),
+            Vec2::new(16.0, crate::theme::row_height()),
         );
         if self.expandable {
             painter.text(
@@ -1160,7 +1163,7 @@ impl TreeRow {
                 } else {
                     icon::CARET_RIGHT
                 },
-                FontId::proportional(11.0),
+                crate::theme::ui_font(11.0),
                 color::text_dim(),
             );
         }

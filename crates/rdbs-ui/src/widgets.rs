@@ -107,7 +107,7 @@ impl Widget for ToolbarButton<'_> {
             rect.center_bottom() - Vec2::new(0.0, 10.0),
             Align2::CENTER_CENTER,
             self.label,
-            FontId::proportional(11.5),
+            crate::theme::ui_font(11.5),
             fg,
         );
         response

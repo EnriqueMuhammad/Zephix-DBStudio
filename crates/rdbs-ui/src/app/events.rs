@@ -391,6 +391,11 @@ impl StudioApp {
                 }
             }
             Event::UpdateChecked { manual, result } => self.update.finished(manual, result),
+            Event::AiChunk { request_id, text } => self.ai.chunk(request_id, &text),
+            Event::AiFinished { request_id, result } => self.ai.finished(request_id, result),
+            Event::AiModelsListed { request_id, result } => {
+                self.ai.models_listed(request_id, result);
+            }
         }
     }
 

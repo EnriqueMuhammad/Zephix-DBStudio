@@ -18,6 +18,7 @@ use crate::theme::{self, color};
 use crate::widgets::{self, format_count, format_duration};
 use crate::workspace::{LastRun, QueryTab, RunPhase, RunState, Running, TabContext};
 
+mod find;
 mod keys;
 mod menu;
 mod results;
@@ -28,6 +29,7 @@ use menu::*;
 use results::*;
 use run::*;
 
+pub(crate) use find::FindState;
 pub(crate) use keys::chord_pending;
 pub(crate) use menu::{EditorAction, apply_editor_action, editor_preferences, show_edit_menu};
 pub(crate) use results::export_table_name;
@@ -449,12 +451,21 @@ fn editor(ui: &mut Ui, q: &mut QueryTab, cx: &mut TabContext<'_>) {
         completion_objects(&c.objects, database.as_deref())
     });
 
+    if q.run.find.is_open() {
+        if has_focus {
+            q.run.find.follow_editor(ui.ctx(), editor_id);
+        }
+        find::bar(ui, q, editor_id);
+    }
+    let highlights = q.run.find.highlights(q.sql.len());
+
     let mut layouter = |ui: &Ui, buf: &dyn TextBuffer, wrap_width: f32| {
         let mut job = if white_space {
             widgets::highlight_sql_whitespace(buf.as_str(), &font)
         } else {
             widgets::highlight_sql(buf.as_str(), &font)
         };
+        highlights.paint(&mut job);
         job.wrap.max_width = if word_wrap { wrap_width } else { f32::INFINITY };
         ui.ctx().fonts_mut(|f| f.layout_job(job))
     };
@@ -517,6 +528,13 @@ fn editor(ui: &mut Ui, q: &mut QueryTab, cx: &mut TabContext<'_>) {
                     .layouter(&mut layouter)
                     .show(ui);
                 paint_line_numbers(ui, gutter.right() - 8.0, &output, &font);
+                if let Some(at) = q.run.find.scroll_to.take() {
+                    let rect = output
+                        .galley
+                        .pos_from_cursor(egui::text::CCursor::new(at))
+                        .translate(output.galley_pos.to_vec2());
+                    ui.scroll_to_rect(rect.expand2(Vec2::new(48.0, row_height)), None);
+                }
                 let has_selection = output
                     .cursor_range
                     .is_some_and(|r| r.primary.index != r.secondary.index);

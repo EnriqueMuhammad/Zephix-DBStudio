@@ -3,6 +3,31 @@
 All notable changes to Zephix. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project uses [Semantic Versioning](https://semver.org/).
 
+## 0.5.0 - 2026-11-19
+
+### Added
+
+- **AI Assistant** panel (View > AI Assistant, toolbar **AI**, Ctrl+Shift+I). Connect any
+  provider that speaks the OpenAI-compatible or Anthropic API: presets for Anthropic, OpenAI,
+  Google Gemini, OpenRouter, Groq, DeepSeek, Ollama and LM Studio, or a custom base URL.
+  **Load Models** lists what the server offers. API keys are kept in the OS keychain.
+  Questions carry the engine, the editor text (or selection), the error of the last run and,
+  optionally, table and column names; result rows are never sent. Answers stream in, and SQL
+  in them can be inserted at the cursor, replace the editor text, or open in a new tab. It is
+  never run automatically. Quick requests: Explain, Fix Error, Optimize, Format & Comment
+  (also in Query > Ask AI).
+- **Tools > Fonts…** chooses the font and size (in points) of the interface, the text editor
+  and the results grid separately, from the fonts installed on the computer. Fixed-width fonts
+  are shown in bold; changes preview at once and Cancel restores them. Defaults on Windows are
+  Segoe UI 10 pt for the interface and grid and Consolas 10 pt for the editor; fonts that are
+  not installed fall back to the built-in ones. Explorer and grid rows grow with the font.
+- **Find and replace** in the query editor: Ctrl+F (find), Ctrl+H (replace), F3 / Shift+F3 or
+  Enter / Shift+Enter (next / previous), also in the Edit menu. Searches as you type, with
+  Match case, Match whole word and regular expressions (`$1` / `${name}` in the replacement).
+  All matches are highlighted and counted ("3 of 12"); Replace All is one undo step. A
+  selection within one line becomes the search text. Without a query tab, Ctrl+F still
+  filters the explorer.
+
 ## 0.4.0 - 2026-11-04
 
 ### Added

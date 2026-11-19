@@ -48,6 +48,7 @@ fn demo_app() -> Harness<'static, StudioApp> {
                     factory: Arc::new(rdbs_adapter_mock::MockAdapterFactory::instant()),
                     credentials: Arc::new(MemoryCredentials::default()),
                     demo_profiles: Some(rdbs_adapter_mock::sample_profiles()),
+                    system_fonts: false,
                 },
             )
             .expect("demo app starts")

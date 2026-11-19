@@ -29,6 +29,10 @@ pub(crate) enum EditorAction {
     ToggleComment,
     IncreaseIndent,
     DecreaseIndent,
+    Find,
+    Replace,
+    FindNext,
+    FindPrevious,
 }
 
 /// Where an editor command is shown.
@@ -49,7 +53,8 @@ pub(super) struct MenuEntry {
     label: &'static str,
     shortcut: &'static str,
     glyph: MenuGlyph,
-    /// `0` clipboard, `1` select all, `2` comments, `3` the old Advanced group, `4` run.
+    /// `0` clipboard, `1` select all, `5` find, `2` comments, `3` the old Advanced group,
+    /// `4` run.
     section: u8,
     /// Shown in the top Edit menu.
     edit: bool,
@@ -63,6 +68,7 @@ pub(super) fn menu_entries() -> &'static [MenuEntry] {
     use EditorAction as A;
     use MenuGlyph::Fixed;
     const ADVANCED: u8 = 3;
+    const FIND: u8 = 5;
     &[
         MenuEntry {
             action: A::Cut,
@@ -102,6 +108,46 @@ pub(super) fn menu_entries() -> &'static [MenuEntry] {
             section: 1,
             edit: true,
             context_root: true,
+            needs_selection: false,
+        },
+        MenuEntry {
+            action: A::Find,
+            label: "Find…",
+            shortcut: "Ctrl+F",
+            glyph: Fixed(icon::MAGNIFYING_GLASS),
+            section: FIND,
+            edit: true,
+            context_root: false,
+            needs_selection: false,
+        },
+        MenuEntry {
+            action: A::Replace,
+            label: "Replace…",
+            shortcut: "Ctrl+H",
+            glyph: Fixed(icon::SWAP),
+            section: FIND,
+            edit: true,
+            context_root: false,
+            needs_selection: false,
+        },
+        MenuEntry {
+            action: A::FindNext,
+            label: "Find Next",
+            shortcut: "F3",
+            glyph: Fixed(icon::ARROW_DOWN),
+            section: FIND,
+            edit: true,
+            context_root: false,
+            needs_selection: false,
+        },
+        MenuEntry {
+            action: A::FindPrevious,
+            label: "Find Previous",
+            shortcut: "Shift+F3",
+            glyph: Fixed(icon::ARROW_UP),
+            section: FIND,
+            edit: true,
+            context_root: false,
             needs_selection: false,
         },
         MenuEntry {
@@ -447,6 +493,14 @@ pub(crate) fn apply_editor_action(
     cx: &mut TabContext<'_>,
 ) {
     use EditorAction as A;
+    // The find commands leave the keyboard where they put it (the find bar, or the editor).
+    match action {
+        A::Find | A::Replace => return find::open(ctx, editor_id, q, action == A::Replace),
+        A::FindNext | A::FindPrevious => {
+            return find::step(ctx, editor_id, q, action == A::FindNext);
+        }
+        _ => {}
+    }
     ctx.memory_mut(|m| m.request_focus(editor_id));
     let sel = current_selection(ctx, editor_id).unwrap_or(Selection::caret(0));
     let text = q.sql.as_str();
@@ -503,6 +557,7 @@ pub(crate) fn apply_editor_action(
         A::ToggleComment => textops::toggle_line_comment(text, sel),
         A::IncreaseIndent => textops::indent_lines(text, sel, true),
         A::DecreaseIndent => textops::indent_lines(text, sel, false),
+        A::Find | A::Replace | A::FindNext | A::FindPrevious => None,
     };
     if let Some(edit) = edit {
         apply_edit(ctx, editor_id, q, edit);
@@ -526,6 +581,10 @@ mod tests {
             A::Copy,
             A::Paste,
             A::SelectAll,
+            A::Find,
+            A::Replace,
+            A::FindNext,
+            A::FindPrevious,
             A::Comment,
             A::Uncomment,
             A::Tabify,

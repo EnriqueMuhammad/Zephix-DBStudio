@@ -113,6 +113,8 @@ pub enum SecretKind {
     Database,
     /// SSH password or private-key passphrase of the tunnel.
     Ssh,
+    /// API key of an AI provider (the id is [`crate::ai::AiProvider::keychain_id`]).
+    AiApiKey,
 }
 
 /// Secure storage for connection passwords (the OS keychain in production).

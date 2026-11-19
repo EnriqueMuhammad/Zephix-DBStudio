@@ -39,7 +39,7 @@ pub(crate) fn fetch_latest_release() -> Result<Option<Release>, String> {
 
 /// The OS certificate store (which also trusts a corporate TLS proxy), or the bundled
 /// Mozilla roots when the store cannot be read.
-fn root_certs() -> ureq::tls::RootCerts {
+pub(crate) fn root_certs() -> ureq::tls::RootCerts {
     let native = rustls_native_certs::load_native_certs();
     for err in &native.errors {
         tracing::debug!("skipping unreadable OS certificate: {err}");
