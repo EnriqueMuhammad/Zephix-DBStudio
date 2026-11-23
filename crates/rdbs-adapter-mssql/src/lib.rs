@@ -36,6 +36,25 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 
 pub(crate) type MssqlClient = Client<Compat<TcpStream>>;
 
+/// Runs catalog reads (`$read`, an expression using `$client`) between [`catalog::relax`]
+/// and [`catalog::restore`], then drops the connection if it broke.
+macro_rules! catalog_read {
+    ($adapter:ident, |$client:ident| $read:expr) => {{
+        let result = async {
+            let $client = $adapter.client().await?;
+            let undo = catalog::relax($client).await?;
+            let read = $read.await.map_err(catalog::lock_hint);
+            let restored = catalog::restore($client, &undo).await;
+            match (read, restored) {
+                (Err(e), _) | (Ok(_), Err(e)) => Err(e),
+                (Ok(value), Ok(())) => Ok(value),
+            }
+        }
+        .await;
+        $adapter.settle(result)
+    }};
+}
+
 /// Opens SQL Server sessions.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct MssqlFactory;
@@ -69,6 +88,10 @@ fn build_config(profile: &ConnectionProfile, password: Option<&str>) -> Config {
         config.database(&profile.database);
     }
     config.application_name(rdbs_core::brand::APP_NAME);
+    // No driver-side command timeout (tiberius defaults to 30 s): a long query or a catalog
+    // read waiting on a lock would fail and leave the connection unusable. Queries are
+    // stopped with Cancel; catalog reads bound their lock waits with LOCK_TIMEOUT.
+    config.command_timeout(None);
     config.authentication(AuthMethod::sql_server(
         &profile.username,
         password.unwrap_or_default(),
@@ -151,6 +174,18 @@ impl MssqlAdapter {
             config,
             version,
         })
+    }
+
+    /// Drops a connection that failed at the transport level (reset, protocol desync), so
+    /// the next use opens a new one instead of failing the same way again.
+    fn settle<T>(&mut self, result: Result<T, DbError>) -> Result<T, DbError> {
+        if result
+            .as_ref()
+            .is_err_and(|e| e.kind == DbErrorKind::Connection)
+        {
+            self.client = None;
+        }
+        result
     }
 
     async fn client(&mut self) -> Result<&mut MssqlClient, DbError> {
@@ -243,20 +278,13 @@ impl DatabaseAdapter for MssqlAdapter {
 
     fn ping(&mut self) -> BoxFuture<'_, Result<(), DbError>> {
         Box::pin(async move {
-            self.client()
-                .await?
-                .simple_query("SELECT 1")
-                .await
-                .map_err(map_error)?
-                .into_results()
-                .await
-                .map_err(map_error)?;
-            Ok(())
+            let result = async { run_batch(self.client().await?, "SELECT 1").await }.await;
+            self.settle(result)
         })
     }
 
     fn load_objects(&mut self) -> BoxFuture<'_, Result<Vec<DbObject>, DbError>> {
-        Box::pin(async move { catalog::load(self.client().await?).await })
+        Box::pin(async move { catalog_read!(self, |client| catalog::load(client)) })
     }
 
     fn explain<'a>(
@@ -265,29 +293,8 @@ impl DatabaseAdapter for MssqlAdapter {
         analyze: bool,
     ) -> BoxFuture<'a, Result<rdbs_core::plan::ExplainPlan, DbError>> {
         Box::pin(async move {
-            let client = self.client().await?;
-            let (on, off) = if analyze {
-                ("SET STATISTICS XML ON", "SET STATISTICS XML OFF")
-            } else {
-                ("SET SHOWPLAN_XML ON", "SET SHOWPLAN_XML OFF")
-            };
-            // An actual plan executes the statement: roll its changes back.
-            if analyze {
-                catalog::text_rows(client, "BEGIN TRANSACTION").await?;
-            }
-            catalog::text_rows(client, on).await?;
-            let rows = catalog::text_rows(client, sql).await;
-            let reset = catalog::text_rows(client, off).await;
-            if analyze {
-                catalog::text_rows(client, "IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION").await?;
-            }
-            reset?;
-            let plans: Vec<String> = rows?
-                .iter()
-                .map(|r| catalog::col(r, 0))
-                .filter(|text| text.starts_with("<ShowPlanXML"))
-                .collect();
-            showplan::parse(&plans, analyze)
+            let result = self.explain_plan(sql, analyze).await;
+            self.settle(result)
         })
     }
 
@@ -295,7 +302,7 @@ impl DatabaseAdapter for MssqlAdapter {
         &'a mut self,
         schema: Option<&'a str>,
     ) -> BoxFuture<'a, Result<Vec<rdbs_core::TableSchema>, DbError>> {
-        Box::pin(async move { describe::describe(self.client().await?, schema).await })
+        Box::pin(async move { catalog_read!(self, |client| describe::describe(client, schema)) })
     }
 
     fn execute<'a>(
@@ -309,7 +316,7 @@ impl DatabaseAdapter for MssqlAdapter {
                 () = cancel.cancelled() => None,
             };
             match finished {
-                Some(result) => result,
+                Some(result) => self.settle(result),
                 None => {
                     // Dropping the client closes the socket; SQL Server aborts the request.
                     self.client = None;
@@ -326,14 +333,16 @@ impl DatabaseAdapter for MssqlAdapter {
         &'a mut self,
         object: &'a rdbs_core::schema::ObjectPath,
     ) -> BoxFuture<'a, Result<String, DbError>> {
-        Box::pin(async move { ddl::object_ddl(self.client().await?, object).await })
+        Box::pin(async move { catalog_read!(self, |client| ddl::object_ddl(client, object)) })
     }
 
     fn routine_signature<'a>(
         &'a mut self,
         object: &'a rdbs_core::schema::ObjectPath,
     ) -> BoxFuture<'a, Result<rdbs_core::routine::RoutineSignature, DbError>> {
-        Box::pin(async move { ddl::routine_signature(self.client().await?, object).await })
+        Box::pin(
+            async move { catalog_read!(self, |client| ddl::routine_signature(client, object)) },
+        )
     }
 
     fn apply_changes<'a>(
@@ -341,31 +350,8 @@ impl DatabaseAdapter for MssqlAdapter {
         changes: &'a [Change],
     ) -> BoxFuture<'a, Result<u64, DbError>> {
         Box::pin(async move {
-            let client = self.client().await?;
-            // BEGIN/COMMIT must run as plain batches: inside `sp_executesql` they would
-            // unbalance the transaction count.
-            run_batch(client, "SET XACT_ABORT ON; BEGIN TRANSACTION").await?;
-            let mut total = 0;
-            for (i, change) in changes.iter().enumerate() {
-                let failure = match client.execute(change.sql.as_str(), &[]).await {
-                    Err(e) => Some(map_error(e)),
-                    Ok(result) => {
-                        let n = result.total();
-                        total += n;
-                        (!change.accepts(n)).then(|| row_count_mismatch(i, change, n))
-                    }
-                };
-                if let Some(e) = failure {
-                    if let Err(rb) =
-                        run_batch(client, "IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION").await
-                    {
-                        tracing::warn!("SQL Server rollback failed: {rb}");
-                    }
-                    return Err(e);
-                }
-            }
-            run_batch(client, "COMMIT TRANSACTION").await?;
-            Ok(total)
+            let result = self.apply(changes).await;
+            self.settle(result)
         })
     }
 
@@ -377,6 +363,65 @@ impl DatabaseAdapter for MssqlAdapter {
                 tracing::debug!("SQL Server close: {e}");
             }
         })
+    }
+}
+
+impl MssqlAdapter {
+    async fn explain_plan(
+        &mut self,
+        sql: &str,
+        analyze: bool,
+    ) -> Result<rdbs_core::plan::ExplainPlan, DbError> {
+        let client = self.client().await?;
+        let (on, off) = if analyze {
+            ("SET STATISTICS XML ON", "SET STATISTICS XML OFF")
+        } else {
+            ("SET SHOWPLAN_XML ON", "SET SHOWPLAN_XML OFF")
+        };
+        // An actual plan executes the statement: roll its changes back.
+        if analyze {
+            catalog::text_rows(client, "BEGIN TRANSACTION").await?;
+        }
+        catalog::text_rows(client, on).await?;
+        let rows = catalog::text_rows(client, sql).await;
+        let reset = catalog::text_rows(client, off).await;
+        if analyze {
+            catalog::text_rows(client, "IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION").await?;
+        }
+        reset?;
+        let plans: Vec<String> = rows?
+            .iter()
+            .map(|r| catalog::col(r, 0))
+            .filter(|text| text.starts_with("<ShowPlanXML"))
+            .collect();
+        showplan::parse(&plans, analyze)
+    }
+
+    async fn apply(&mut self, changes: &[Change]) -> Result<u64, DbError> {
+        let client = self.client().await?;
+        // BEGIN/COMMIT must run as plain batches: inside `sp_executesql` they would
+        // unbalance the transaction count.
+        run_batch(client, "SET XACT_ABORT ON; BEGIN TRANSACTION").await?;
+        let mut total = 0;
+        for (i, change) in changes.iter().enumerate() {
+            let failure = match client.execute(change.sql.as_str(), &[]).await {
+                Err(e) => Some(map_error(e)),
+                Ok(result) => {
+                    let n = result.total();
+                    total += n;
+                    (!change.accepts(n)).then(|| row_count_mismatch(i, change, n))
+                }
+            };
+            if let Some(e) = failure {
+                if let Err(rb) = run_batch(client, "IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION").await
+                {
+                    tracing::warn!("SQL Server rollback failed: {rb}");
+                }
+                return Err(e);
+            }
+        }
+        run_batch(client, "COMMIT TRANSACTION").await?;
+        Ok(total)
     }
 }
 
@@ -451,6 +496,11 @@ pub(crate) fn map_error(e: tiberius::error::Error) -> DbError {
             DbError::new(DbErrorKind::Connection, format!("{kind:?}: {message}"))
         }
         Error::Tls(message) => DbError::new(DbErrorKind::Connection, format!("TLS: {message}")),
+        // The TDS stream is out of step with the server; this connection cannot be reused.
+        Error::Protocol(message) => DbError::new(
+            DbErrorKind::Connection,
+            format!("Protocol error: {message}"),
+        ),
         other => DbError::new(DbErrorKind::Internal, other.to_string()),
     }
 }

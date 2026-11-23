@@ -330,8 +330,7 @@ fn profile_node(
                 );
             }
             for obj in objects {
-                let loading = conn.map(|c| &c.loading_databases);
-                object_node(ui, state, cx.actions, obj, &key, 1, &path, needle, loading);
+                object_node(ui, state, cx.actions, obj, &key, 1, &path, needle, conn);
             }
         }
         _ => hint_row(ui, 1, "Not connected", color::text_faint()),
@@ -434,7 +433,7 @@ fn object_node(
     depth: usize,
     path: &PathCtx,
     needle: &str,
-    loading: Option<&HashSet<String>>,
+    conn: Option<&crate::model::ConnState>,
 ) {
     if !obj.matches_filter(needle) {
         return;
@@ -443,7 +442,10 @@ fn object_node(
     let lazy = obj.kind == ObjectKind::Database
         && obj.children.is_empty()
         && obj.detail.as_deref() == Some(rdbs_core::schema::NOT_LOADED);
-    let is_loading = lazy && loading.is_some_and(|l| l.contains(&obj.name));
+    let is_loading = lazy && conn.is_some_and(|c| c.loading_databases.contains(&obj.name));
+    let load_error = conn
+        .filter(|_| lazy && !is_loading)
+        .and_then(|c| c.database_errors.get(&obj.name));
     let shown_name = obj.display_name();
     let key = format!("{parent_key}/{shown_name}");
     // A folder filter keeps the children whose name contains the text.
@@ -598,6 +600,8 @@ fn object_node(
     if open {
         if is_loading {
             hint_row(ui, depth + 1, "Loading…", color::text_dim());
+        } else if let Some(error) = load_error {
+            hint_row(ui, depth + 1, error, color::danger());
         }
         for child in obj.children.iter().filter(|child| {
             folder_filter
@@ -613,7 +617,7 @@ fn object_node(
                 depth + 1,
                 &here,
                 needle,
-                loading,
+                conn,
             );
         }
     }
@@ -1082,6 +1086,7 @@ fn hint_row(ui: &mut Ui, depth: usize, text: &str, c: Color32) {
         galley,
         c,
     );
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, text));
     response.on_hover_text(text);
 }
 
@@ -1219,5 +1224,48 @@ mod tests {
             refresh_action(&lite, &folder),
             UiAction::Refresh(id) if id == lite.profile_id
         ));
+    }
+
+    /// Draws one database node of an SQL Server connection, expanded.
+    fn expanded_database(conn: ConnState) -> egui_kittest::Harness<'static> {
+        let db = DbObject::new("d_temporary", ObjectKind::Database)
+            .with_detail(rdbs_core::schema::NOT_LOADED);
+        let ctx = path(DatabaseKind::SqlServer, None);
+        let mut state = ExplorerState::default();
+        state.expanded.insert("p/d_temporary".to_owned());
+        let mut harness = egui_kittest::Harness::new_ui(move |ui| {
+            let mut actions = Vec::new();
+            object_node(
+                ui,
+                &mut state,
+                &mut actions,
+                &db,
+                "p",
+                1,
+                &ctx,
+                "",
+                Some(&conn),
+            );
+        });
+        harness.run();
+        harness
+    }
+
+    #[test]
+    fn a_failed_database_load_says_why_under_the_node() {
+        use egui_kittest::kittest::Queryable;
+        let mut conn = ConnState::default();
+        conn.database_errors.insert(
+            "d_temporary".to_owned(),
+            "Could not load: catalog locked (expand again to retry)".to_owned(),
+        );
+        let harness = expanded_database(conn.clone());
+        harness.get_by_label("Could not load: catalog locked (expand again to retry)");
+
+        // While a new attempt runs, the old error gives way to "Loading…".
+        conn.loading_databases.insert("d_temporary".to_owned());
+        let harness = expanded_database(conn);
+        harness.get_by_label("Loading…");
+        assert!(harness.query_by_label_contains("Could not load").is_none());
     }
 }

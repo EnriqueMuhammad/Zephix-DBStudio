@@ -148,6 +148,7 @@ impl StudioApp {
                     .find(|o| o.kind == rdbs_core::ObjectKind::Database && !o.children.is_empty())
                     .map(|o| o.name.clone());
                 conn.loading_databases.clear();
+                conn.database_errors.clear();
                 conn.objects = objects;
                 if self.status.as_ref().is_some_and(|s| s.text == REFRESHING) {
                     self.status = Some(StatusMessage::info("Objects refreshed"));
@@ -166,6 +167,7 @@ impl StudioApp {
             } => {
                 if let Some(conn) = self.connections.get_mut(&profile_id) {
                     conn.loading_databases.remove(&database);
+                    conn.database_errors.remove(&database);
                     if let Some(node) = conn.objects.iter_mut().find(|o| o.name == database) {
                         node.children = objects;
                         node.detail = None;
@@ -179,6 +181,11 @@ impl StudioApp {
             } => {
                 if let Some(conn) = self.connections.get_mut(&profile_id) {
                     conn.loading_databases.remove(&database);
+                    // Shown under the expanded node; collapsing and expanding retries.
+                    conn.database_errors.insert(
+                        database.clone(),
+                        format!("Could not load: {} (expand again to retry)", error.message),
+                    );
                 }
                 self.status = Some(StatusMessage::error(format!(
                     "Could not open database {database}: {error}"

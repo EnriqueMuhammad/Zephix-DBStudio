@@ -28,6 +28,15 @@ and the project uses [Semantic Versioning](https://semver.org/).
   selection within one line becomes the search text. Without a query tab, Ctrl+F still
   filters the explorer.
 
+### Fixed
+
+- SQL Server: expanding a database whose catalog is locked by another session (for example a
+  job creating a table inside an open transaction) no longer hangs on "Loading…" and then
+  fails with "connection was left out of sync". Catalog reads skip uncommitted schema changes
+  and give up after 10 s with a clear reason, which is shown under the database node;
+  expanding it again retries. Queries no longer stop after 30 s without results, and a broken
+  connection is replaced on the next use.
+
 ## 0.4.0 - 2026-11-04
 
 ### Added
