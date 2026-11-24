@@ -272,6 +272,31 @@ pub enum Command {
         /// Asked for from the menu (the UI reports "up to date" and errors), not at start-up.
         manual: bool,
     },
+    /// Ask an AI provider (ADR 0014). The answer streams back as [`Event::AiChunk`]s and
+    /// ends with [`Event::AiFinished`]; [`Command::Cancel`] stops it.
+    AiChat {
+        /// Correlation id.
+        request_id: RequestId,
+        /// Provider to ask.
+        provider: crate::ai::AiProvider,
+        /// API key typed for this request; `None` reads the keychain (when the provider
+        /// needs a key).
+        api_key: Option<String>,
+        /// Instructions and context ([`crate::ai::system_prompt`]).
+        system: String,
+        /// The conversation so far, ending with the user's question.
+        messages: Vec<crate::ai::AiMessage>,
+    },
+    /// List the models a provider offers (`GET {base}/models`). Answered with
+    /// [`Event::AiModelsListed`].
+    AiListModels {
+        /// Correlation id.
+        request_id: RequestId,
+        /// Provider to ask (may be unsaved).
+        provider: crate::ai::AiProvider,
+        /// API key typed in the dialog; `None` reads the keychain.
+        api_key: Option<String>,
+    },
 }
 
 /// Events sent from the worker to the UI.
@@ -479,5 +504,26 @@ pub enum Event {
         manual: bool,
         /// Latest release, whatever its version; the UI compares it with its own.
         result: Result<Option<crate::update::Release>, String>,
+    },
+    /// More text of an AI answer ([`Command::AiChat`]).
+    AiChunk {
+        /// Correlation id.
+        request_id: RequestId,
+        /// Text to append.
+        text: String,
+    },
+    /// An AI answer is complete, failed or was cancelled (one sentence).
+    AiFinished {
+        /// Correlation id.
+        request_id: RequestId,
+        /// `Err` when the request failed; the text already sent stays.
+        result: Result<(), String>,
+    },
+    /// Answer to [`Command::AiListModels`].
+    AiModelsListed {
+        /// Correlation id.
+        request_id: RequestId,
+        /// Model ids, sorted, or why they could not be listed.
+        result: Result<Vec<String>, String>,
     },
 }

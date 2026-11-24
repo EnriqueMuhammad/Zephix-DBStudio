@@ -16,8 +16,14 @@ use crate::widgets::format_count;
 /// Maximum number of characters rendered per cell (full value is still copyable).
 const MAX_CELL_CHARS: usize = 120;
 /// Row and header heights.
-const ROW_HEIGHT: f32 = 22.0;
-const HEADER_HEIGHT: f32 = 24.0;
+/// Grid row height for the grid font size (22 at the default size).
+fn row_height() -> f32 {
+    theme::grid_row_height()
+}
+/// Header row height (24 at the default size).
+fn header_height() -> f32 {
+    row_height() + 2.0
+}
 /// Space between a cell's border and its text.
 const CELL_PAD: f32 = 6.0;
 /// Rows measured to size the columns.
@@ -25,7 +31,7 @@ const MEASURED_ROWS: usize = 200;
 
 /// Font of cell and header text.
 fn cell_font() -> egui::FontId {
-    egui::FontId::proportional(13.0)
+    theme::grid_font()
 }
 
 /// Grid interaction state.
@@ -83,12 +89,12 @@ fn fit_widths(ctx: &egui::Context, rs: &ResultSet) -> Vec<f32> {
 /// Height that shows every row of `rs` (plus room for a horizontal scroll bar).
 #[allow(clippy::cast_precision_loss)]
 pub fn fitted_height(rs: &ResultSet) -> f32 {
-    HEADER_HEIGHT + ROW_HEIGHT * rs.rows.len() as f32 + 14.0
+    header_height() + row_height() * rs.rows.len() as f32 + 14.0
 }
 
 /// Height of a grid without rows: the header and a little space.
 pub fn empty_height() -> f32 {
-    HEADER_HEIGHT + ROW_HEIGHT + 14.0
+    header_height() + row_height() + 14.0
 }
 
 /// Thin border at the right and bottom of a cell.
@@ -283,7 +289,7 @@ pub fn show(
     let n_rows = existing + added;
     #[allow(clippy::cast_precision_loss)]
     let gutter = (2.0 * CELL_PAD + 7.5 * format_count(n_rows as u64).len() as f32).max(30.0);
-    let mono = theme::mono();
+    let mono = theme::grid_mono();
     let font = cell_font();
     let key = shape_key(rs);
     if state.widths.as_ref().is_none_or(|(k, _)| *k != key) {
@@ -323,7 +329,7 @@ pub fn show(
                 table = table.column(Column::initial(*w).at_least(32.0).clip(true));
             }
             table
-                .header(HEADER_HEIGHT, |mut header| {
+                .header(header_height(), |mut header| {
                     header.col(|ui| {
                         // The blank corner selects every row; right-click to copy them.
                         let rect = ui.max_rect();
@@ -361,7 +367,7 @@ pub fn show(
                     }
                 })
                 .body(|body| {
-                    body.rows(ROW_HEIGHT, n_rows, |mut row| {
+                    body.rows(row_height(), n_rows, |mut row| {
                         let r = row.index();
                         let row_ref = if r < existing {
                             RowRef::Existing(r)
@@ -815,7 +821,7 @@ mod tests {
         b.columns[1].name = "renamed".into();
         assert_ne!(shape_key(&a), shape_key(&b));
         // One header plus one row, and room for the scroll bar.
-        assert!((fitted_height(&a) - (HEADER_HEIGHT + ROW_HEIGHT + 14.0)).abs() < f32::EPSILON);
+        assert!((fitted_height(&a) - (header_height() + row_height() + 14.0)).abs() < f32::EPSILON);
     }
 
     #[test]

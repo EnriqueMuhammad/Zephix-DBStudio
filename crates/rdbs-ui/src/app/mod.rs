@@ -29,6 +29,7 @@ use crate::widgets::{self, ToolbarButton};
 use crate::workspace::{LastRun, RunPhase, Tab, TabContext, Workspace};
 
 mod actions;
+mod ai;
 mod chrome;
 mod events;
 mod keyboard;
@@ -56,10 +57,16 @@ const SC_SAVE_QUERY_AS: KeyboardShortcut =
     KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::S);
 const SC_SIDEBAR: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::B);
 const SC_FILTER: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::F);
+const SC_REPLACE: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::H);
+const SC_FIND_NEXT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::F3);
+const SC_FIND_PREVIOUS: KeyboardShortcut = KeyboardShortcut::new(Modifiers::SHIFT, Key::F3);
 const SC_RUN: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Enter);
 const SC_RUN_ALT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::R);
 /// Runs the active query tab; with no query tab active it refreshes the selected connection.
 const SC_F5: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::F5);
+/// Shows or hides the AI assistant panel.
+const SC_AI_PANEL: KeyboardShortcut =
+    KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::I);
 
 /// Error type returned while creating the app.
 pub type InitError = Box<dyn std::error::Error + Send + Sync>;
@@ -72,6 +79,9 @@ pub struct AppConfig {
     pub credentials: Arc<dyn CredentialStore>,
     /// `Some` runs in demo mode: profiles live in memory, seeded with these.
     pub demo_profiles: Option<Vec<ConnectionProfile>>,
+    /// Use installed fonts (listed on a background thread). Tests turn it off so layouts do
+    /// not depend on the machine.
+    pub system_fonts: bool,
 }
 
 /// The password prompt shown before connecting a profile without a saved password.
@@ -205,6 +215,10 @@ pub struct StudioApp {
     reconnect: Option<ReconnectIntent>,
     /// Update check: menu, start-up toast and status-bar notice.
     update: crate::update::UpdateState,
+    /// AI assistant panel, its providers and the conversation.
+    ai: crate::ai::AiState,
+    /// Interface, editor and grid fonts, and Tools > Fonts.
+    fonts: crate::fonts::FontState,
 }
 
 /// A reconnect the user asked for. Kept until the worker reports success or failure so a
@@ -263,7 +277,13 @@ impl StudioApp {
                 })
             })
             .unwrap_or_default();
-        theme::apply(&cc.egui_ctx, mode);
+        let fonts = crate::fonts::FontState::new(
+            cc.storage
+                .and_then(|s| eframe::get_value(s, crate::fonts::FONTS_KEY))
+                .unwrap_or_default(),
+            config.system_fonts,
+        );
+        theme::apply(&cc.egui_ctx, mode, &fonts.settings);
 
         let repaint_ctx = cc.egui_ctx.clone();
         let services =
@@ -324,6 +344,21 @@ impl StudioApp {
                 .flatten(),
         );
 
+        let ai = crate::ai::AiState::new(
+            cc.storage
+                .and_then(|s| eframe::get_value(s, crate::ai::PROVIDERS_KEY))
+                .unwrap_or_default(),
+            cc.storage
+                .and_then(|s| eframe::get_value::<Option<uuid::Uuid>>(s, crate::ai::ACTIVE_KEY))
+                .flatten(),
+            cc.storage
+                .and_then(|s| eframe::get_value(s, crate::ai::VISIBLE_KEY))
+                .unwrap_or(false),
+            cc.storage
+                .and_then(|s| eframe::get_value(s, crate::ai::SEND_SCHEMA_KEY))
+                .unwrap_or(true),
+        );
+
         Ok(Self {
             window_fit: crate::window::WindowFit::default(),
             services,
@@ -355,9 +390,12 @@ impl StudioApp {
             },
             reconnect: None,
             update,
+            ai,
+            fonts,
         })
         .map(|mut app| {
             app.reload_history();
+            app.refresh_ai_keys();
             if app.update.check_on_start {
                 app.check_for_updates(false);
             }
@@ -491,6 +529,7 @@ impl eframe::App for StudioApp {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         theme::follow_system(&ctx);
+        self.fonts.poll(&ctx);
         self.window_fit.update(&ctx);
         self.drain_events();
         self.tick_schedules(&ctx);
@@ -523,6 +562,7 @@ impl eframe::App for StudioApp {
             .frame(bar(Margin::symmetric(10, 0)))
             .show(ui, |ui| self.status_bar(ui));
 
+        self.ai_panel(ui, &mut actions);
         if self.workspace.sidebar_visible {
             egui::Panel::left(Id::new("explorer"))
                 .resizable(true)
@@ -597,6 +637,8 @@ impl eframe::App for StudioApp {
             self.check_for_updates(true);
         }
         self.update.toast(&ctx);
+        self.ai_dialog(&ctx, &mut actions);
+        self.fonts.dialog(&ctx);
         self.apply(actions);
     }
 
@@ -619,6 +661,11 @@ impl eframe::App for StudioApp {
             crate::update::SKIPPED_VERSION_KEY,
             &self.update.skipped,
         );
+        eframe::set_value(storage, crate::fonts::FONTS_KEY, &self.fonts.settings);
+        eframe::set_value(storage, crate::ai::PROVIDERS_KEY, &self.ai.providers);
+        eframe::set_value(storage, crate::ai::ACTIVE_KEY, &self.ai.active);
+        eframe::set_value(storage, crate::ai::VISIBLE_KEY, &self.ai.visible);
+        eframe::set_value(storage, crate::ai::SEND_SCHEMA_KEY, &self.ai.send_schema);
         if let Some(dir) = &self.scripts.last_dir {
             eframe::set_value(storage, crate::scripts::SCRIPT_DIR_KEY, dir);
         }

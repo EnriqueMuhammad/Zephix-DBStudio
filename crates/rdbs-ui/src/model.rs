@@ -34,6 +34,8 @@ pub struct ConnState {
     pub default_database: Option<String>,
     /// Other databases whose objects are being loaded.
     pub loading_databases: std::collections::HashSet<String>,
+    /// Why the last load of another database failed, shown under its node until it loads.
+    pub database_errors: std::collections::HashMap<String, String>,
     /// Sessions the server dropped. `None` is the profile's own database.
     ///
     /// Open tabs and their editor text stay. Reconnect replaces the session.

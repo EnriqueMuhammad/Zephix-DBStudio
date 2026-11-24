@@ -308,6 +308,92 @@ async fn object_tree_contains_tables_and_columns() {
     assert_eq!(details, ["bigint · PK", "nvarchar(20) · NOT NULL"]);
 }
 
+/// A job that creates a table inside an open transaction holds schema locks that block
+/// READ COMMITTED catalog reads. The explorer must load anyway, and leave the session's
+/// own SET options as they were.
+#[tokio::test]
+async fn catalog_loads_past_an_open_ddl_transaction() {
+    let Some(mut writer) = session().await else {
+        return;
+    };
+    let Some(mut reader) = session().await else {
+        return;
+    };
+    writer
+        .execute(
+            "IF OBJECT_ID('dbo.it_lock_probe') IS NOT NULL DROP TABLE dbo.it_lock_probe; \
+             BEGIN TRANSACTION; SELECT TOP (1) name INTO dbo.it_lock_probe FROM sys.objects",
+            CancelHandle::new(),
+        )
+        .await
+        .expect("open DDL transaction");
+    reader
+        .execute(
+            "SET LOCK_TIMEOUT 1234; SET TRANSACTION ISOLATION LEVEL SERIALIZABLE",
+            CancelHandle::new(),
+        )
+        .await
+        .expect("session options");
+
+    let started = Instant::now();
+    let tree = reader.load_objects().await;
+    let describe = reader.describe_schema(Some("dbo")).await;
+    let elapsed = started.elapsed();
+    let settings = reader
+        .execute(
+            "SELECT @@LOCK_TIMEOUT, transaction_isolation_level FROM sys.dm_exec_sessions \
+             WHERE session_id = @@SPID",
+            CancelHandle::new(),
+        )
+        .await
+        .expect("read options");
+    writer
+        .execute("ROLLBACK TRANSACTION", CancelHandle::new())
+        .await
+        .expect("rollback");
+
+    let tree = tree.expect("objects load while the transaction is open");
+    describe.expect("columns load while the transaction is open");
+    assert!(elapsed < Duration::from_secs(5), "took {elapsed:?}");
+    assert!(
+        tree.iter()
+            .any(|d| d.name == "master" && !d.children.is_empty())
+    );
+    let row = &settings.last_result().expect("options row").rows[0];
+    assert_eq!(row[0], CellValue::Int(1234));
+    assert_eq!(row[1], CellValue::Int(4), "SERIALIZABLE restored");
+}
+
+/// A broken connection is replaced on the next call instead of failing forever.
+#[tokio::test]
+async fn reconnects_after_the_server_drops_the_session() {
+    let Some(mut victim) = session().await else {
+        return;
+    };
+    let Some(mut admin) = session().await else {
+        return;
+    };
+    let spid = victim
+        .execute("SELECT @@SPID", CancelHandle::new())
+        .await
+        .expect("spid");
+    let CellValue::Int(spid) = spid.last_result().expect("row").rows[0][0] else {
+        panic!("spid is an int");
+    };
+    admin
+        .execute(&format!("KILL {spid}"), CancelHandle::new())
+        .await
+        .expect("kill session");
+    // The first call may notice the dead socket; the one after must work again.
+    let first = victim.load_objects().await;
+    let second = victim.load_objects().await;
+    assert!(
+        first.is_ok() || second.is_ok(),
+        "first: {first:?}, second: {second:?}"
+    );
+    second.expect("reconnected");
+}
+
 const PROG_CLEANUP: &str = "\
     IF EXISTS (SELECT 1 FROM sys.triggers WHERE name = 'it_db_trigger' AND parent_class = 0) \
         DROP TRIGGER it_db_trigger ON DATABASE; \

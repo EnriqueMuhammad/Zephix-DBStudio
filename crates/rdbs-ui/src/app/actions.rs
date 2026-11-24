@@ -196,6 +196,7 @@ impl StudioApp {
                     };
                     if let Some(conn) = self.connections.get_mut(&profile_id) {
                         conn.loading_databases.insert(database.clone());
+                        conn.database_errors.remove(&database);
                     }
                     self.services.send(Command::LoadDatabase {
                         profile,

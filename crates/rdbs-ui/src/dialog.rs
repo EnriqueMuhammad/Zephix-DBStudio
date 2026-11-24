@@ -168,7 +168,7 @@ impl ConnectionDialog {
                     egui::pos2(badge.right() + 8.0, rect.center().y),
                     egui::Align2::LEFT_CENTER,
                     kind.display_name(),
-                    egui::FontId::proportional(13.5),
+                    crate::theme::ui_font(13.5),
                     color::text(),
                 );
                 if response.clicked() && !selected {

@@ -3,11 +3,13 @@
 //! The UI never performs database I/O itself: it sends typed commands to the background
 //! worker in `rdbs-services` and renders the events it receives (see ADR 0003).
 
+mod ai;
 mod app;
 mod autocomplete;
 mod dialog;
 mod editor;
 mod explorer;
+mod fonts;
 mod grid;
 mod history;
 mod model;

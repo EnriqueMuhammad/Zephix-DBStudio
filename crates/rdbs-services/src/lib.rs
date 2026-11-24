@@ -19,6 +19,7 @@ use rdbs_core::{
 };
 use tokio::sync::{Mutex as AsyncMutex, mpsc};
 
+mod ai;
 mod update;
 
 type Notify = Arc<dyn Fn() + Send + Sync>;
@@ -135,6 +136,8 @@ fn command_name(command: &Command) -> &'static str {
         Command::Shutdown => "Shutdown",
         Command::ProbeSessions => "ProbeSessions",
         Command::CheckForUpdates { .. } => "CheckForUpdates",
+        Command::AiChat { .. } => "AiChat",
+        Command::AiListModels { .. } => "AiListModels",
     }
 }
 
@@ -392,6 +395,36 @@ impl Worker {
                             .await
                             .unwrap_or_else(|e| Err(format!("The update check stopped: {e}")));
                         emitter.emit(Event::UpdateChecked { manual, result });
+                    });
+                }
+                Command::AiChat {
+                    request_id,
+                    provider,
+                    api_key,
+                    system,
+                    messages,
+                } => {
+                    let w = self.clone();
+                    tokio::spawn(async move {
+                        w.ai_chat(request_id, provider, api_key, system, messages)
+                            .await;
+                    });
+                }
+                Command::AiListModels {
+                    request_id,
+                    provider,
+                    api_key,
+                } => {
+                    let w = self.clone();
+                    tokio::spawn(async move {
+                        let key = w.ai_key(&provider, api_key).await;
+                        let request = rdbs_core::ai::models_request(&provider, key.as_deref());
+                        let result =
+                            tokio::task::spawn_blocking(move || ai::list_models(&request))
+                                .await
+                                .unwrap_or_else(|e| Err(format!("The request stopped: {e}")));
+                        w.emitter
+                            .emit(Event::AiModelsListed { request_id, result });
                     });
                 }
                     }
@@ -824,6 +857,77 @@ impl Worker {
             database,
             error: error.clone(),
         });
+    }
+
+    /// The API key to send: the one typed for this request, else the keychain's (only for
+    /// providers that need a key).
+    async fn ai_key(
+        &self,
+        provider: &rdbs_core::ai::AiProvider,
+        typed: Option<String>,
+    ) -> Option<String> {
+        if !provider.needs_key {
+            return None;
+        }
+        if typed.is_some() {
+            return typed;
+        }
+        let store = self.credentials.clone();
+        let id = provider.keychain_id();
+        match tokio::task::spawn_blocking(move || store.get(id, rdbs_core::SecretKind::AiApiKey))
+            .await
+        {
+            Ok(Ok(saved)) => saved,
+            Ok(Err(e)) => {
+                tracing::warn!("could not read the AI API key from the keychain: {e}");
+                None
+            }
+            Err(e) => {
+                tracing::warn!("keychain lookup stopped: {e}");
+                None
+            }
+        }
+    }
+
+    /// Streams an AI answer as [`Event::AiChunk`]s, then [`Event::AiFinished`].
+    async fn ai_chat(
+        &self,
+        request_id: RequestId,
+        provider: rdbs_core::ai::AiProvider,
+        api_key: Option<String>,
+        system: String,
+        messages: Vec<rdbs_core::ai::AiMessage>,
+    ) {
+        let cancel = CancelHandle::new();
+        self.running
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(request_id, cancel.clone());
+        let key = self.ai_key(&provider, api_key).await;
+        let result = if provider.needs_key && key.is_none() {
+            Err(format!(
+                "No API key is saved for {}. Add it in AI Assistant settings.",
+                provider.name
+            ))
+        } else {
+            let request =
+                rdbs_core::ai::chat_request(&provider, key.as_deref(), &system, &messages);
+            let emitter = self.emitter.clone();
+            let protocol = provider.protocol;
+            let blocking_cancel = cancel.clone();
+            tokio::task::spawn_blocking(move || {
+                ai::chat(&request, protocol, &blocking_cancel, |text| {
+                    emitter.emit(Event::AiChunk { request_id, text });
+                })
+            })
+            .await
+            .unwrap_or_else(|e| Err(format!("The request stopped: {e}")))
+        };
+        self.running
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&request_id);
+        self.emitter.emit(Event::AiFinished { request_id, result });
     }
 
     fn cancel(&self, request_id: RequestId) {

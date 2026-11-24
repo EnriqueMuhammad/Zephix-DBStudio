@@ -16,6 +16,7 @@ fn entry(id: ProfileId, kind: SecretKind) -> Result<keyring::Entry, CredentialEr
     let account = match kind {
         SecretKind::Database => id.to_string(),
         SecretKind::Ssh => format!("{id}:ssh"),
+        SecretKind::AiApiKey => format!("{id}:ai"),
     };
     keyring::Entry::new(KEYRING_SERVICE, &account).map_err(|e| CredentialError(e.to_string()))
 }

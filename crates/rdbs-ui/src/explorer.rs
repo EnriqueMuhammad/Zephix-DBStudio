@@ -11,7 +11,6 @@ use crate::model::{ConnState, ConnStatus, ObjectRef, UiAction};
 use crate::theme::{self, color};
 use crate::widgets;
 
-const ROW_HEIGHT: f32 = 22.0;
 const INDENT: f32 = 14.0;
 
 /// Explorer view state.
@@ -173,7 +172,7 @@ fn profile_node(
         let name = fit_label(
             ui,
             &profile.name,
-            FontId::proportional(13.5),
+            crate::theme::ui_font(13.5),
             text_color,
             name_width,
         );
@@ -191,7 +190,7 @@ fn profile_node(
                 egui::pos2(x, rect.center().y),
                 Align2::LEFT_CENTER,
                 profile.environment.short(),
-                FontId::proportional(9.5),
+                crate::theme::ui_font(9.5),
                 c,
             );
         }
@@ -214,7 +213,7 @@ fn profile_node(
                     right,
                     Align2::CENTER_CENTER,
                     icon::WARNING,
-                    FontId::proportional(13.0),
+                    crate::theme::ui_font(13.0),
                     color::danger(),
                 );
             }
@@ -331,8 +330,7 @@ fn profile_node(
                 );
             }
             for obj in objects {
-                let loading = conn.map(|c| &c.loading_databases);
-                object_node(ui, state, cx.actions, obj, &key, 1, &path, needle, loading);
+                object_node(ui, state, cx.actions, obj, &key, 1, &path, needle, conn);
             }
         }
         _ => hint_row(ui, 1, "Not connected", color::text_faint()),
@@ -435,7 +433,7 @@ fn object_node(
     depth: usize,
     path: &PathCtx,
     needle: &str,
-    loading: Option<&HashSet<String>>,
+    conn: Option<&crate::model::ConnState>,
 ) {
     if !obj.matches_filter(needle) {
         return;
@@ -444,7 +442,10 @@ fn object_node(
     let lazy = obj.kind == ObjectKind::Database
         && obj.children.is_empty()
         && obj.detail.as_deref() == Some(rdbs_core::schema::NOT_LOADED);
-    let is_loading = lazy && loading.is_some_and(|l| l.contains(&obj.name));
+    let is_loading = lazy && conn.is_some_and(|c| c.loading_databases.contains(&obj.name));
+    let load_error = conn
+        .filter(|_| lazy && !is_loading)
+        .and_then(|c| c.database_errors.get(&obj.name));
     let shown_name = obj.display_name();
     let key = format!("{parent_key}/{shown_name}");
     // A folder filter keeps the children whose name contains the text.
@@ -470,13 +471,13 @@ fn object_node(
             egui::pos2(rect.left() + 8.0, rect.center().y),
             Align2::CENTER_CENTER,
             glyph,
-            FontId::proportional(14.0),
+            crate::theme::ui_font(14.0),
             glyph_color,
         );
         let name_x = rect.left() + 20.0;
         let available = (rect.right() - 4.0 - name_x).max(0.0);
-        let name_font = FontId::proportional(13.0);
-        let detail_font = FontId::proportional(11.0);
+        let name_font = crate::theme::ui_font(13.0);
+        let detail_font = crate::theme::ui_font(11.0);
         let filter_note = folder_filter.as_ref().map(|f| format!("filter: {f}"));
         let detail = filter_note
             .as_deref()
@@ -599,6 +600,8 @@ fn object_node(
     if open {
         if is_loading {
             hint_row(ui, depth + 1, "Loading…", color::text_dim());
+        } else if let Some(error) = load_error {
+            hint_row(ui, depth + 1, error, color::danger());
         }
         for child in obj.children.iter().filter(|child| {
             folder_filter
@@ -614,7 +617,7 @@ fn object_node(
                 depth + 1,
                 &here,
                 needle,
-                loading,
+                conn,
             );
         }
     }
@@ -1066,13 +1069,15 @@ fn object_icon_dark(obj: &DbObject) -> (&'static str, Color32) {
 }
 
 fn hint_row(ui: &mut Ui, depth: usize, text: &str, c: Color32) {
-    let (rect, response) =
-        ui.allocate_exact_size(Vec2::new(ui.available_width(), ROW_HEIGHT), Sense::hover());
+    let (rect, response) = ui.allocate_exact_size(
+        Vec2::new(ui.available_width(), crate::theme::row_height()),
+        Sense::hover(),
+    );
     let x = rect.left() + 20.0 + depth as f32 * INDENT;
     let galley = fit_label(
         ui,
         text,
-        FontId::proportional(12.0),
+        crate::theme::ui_font(12.0),
         c,
         (rect.right() - 6.0 - x).max(0.0),
     );
@@ -1081,6 +1086,7 @@ fn hint_row(ui: &mut Ui, depth: usize, text: &str, c: Color32) {
         galley,
         c,
     );
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, text));
     response.on_hover_text(text);
 }
 
@@ -1133,8 +1139,10 @@ impl TreeRow {
         } else {
             Sense::click()
         };
-        let (rect, response) =
-            ui.allocate_exact_size(Vec2::new(ui.available_width(), ROW_HEIGHT), sense);
+        let (rect, response) = ui.allocate_exact_size(
+            Vec2::new(ui.available_width(), crate::theme::row_height()),
+            sense,
+        );
         let painter = ui.painter();
         if self.selected {
             painter.rect_filled(rect, CornerRadius::same(3), color::selection());
@@ -1149,7 +1157,7 @@ impl TreeRow {
         let caret_x = rect.left() + 10.0 + self.depth as f32 * INDENT;
         let caret_rect = Rect::from_center_size(
             egui::pos2(caret_x, rect.center().y),
-            Vec2::new(16.0, ROW_HEIGHT),
+            Vec2::new(16.0, crate::theme::row_height()),
         );
         if self.expandable {
             painter.text(
@@ -1160,7 +1168,7 @@ impl TreeRow {
                 } else {
                     icon::CARET_RIGHT
                 },
-                FontId::proportional(11.0),
+                crate::theme::ui_font(11.0),
                 color::text_dim(),
             );
         }
@@ -1216,5 +1224,48 @@ mod tests {
             refresh_action(&lite, &folder),
             UiAction::Refresh(id) if id == lite.profile_id
         ));
+    }
+
+    /// Draws one database node of an SQL Server connection, expanded.
+    fn expanded_database(conn: ConnState) -> egui_kittest::Harness<'static> {
+        let db = DbObject::new("d_temporary", ObjectKind::Database)
+            .with_detail(rdbs_core::schema::NOT_LOADED);
+        let ctx = path(DatabaseKind::SqlServer, None);
+        let mut state = ExplorerState::default();
+        state.expanded.insert("p/d_temporary".to_owned());
+        let mut harness = egui_kittest::Harness::new_ui(move |ui| {
+            let mut actions = Vec::new();
+            object_node(
+                ui,
+                &mut state,
+                &mut actions,
+                &db,
+                "p",
+                1,
+                &ctx,
+                "",
+                Some(&conn),
+            );
+        });
+        harness.run();
+        harness
+    }
+
+    #[test]
+    fn a_failed_database_load_says_why_under_the_node() {
+        use egui_kittest::kittest::Queryable;
+        let mut conn = ConnState::default();
+        conn.database_errors.insert(
+            "d_temporary".to_owned(),
+            "Could not load: catalog locked (expand again to retry)".to_owned(),
+        );
+        let harness = expanded_database(conn.clone());
+        harness.get_by_label("Could not load: catalog locked (expand again to retry)");
+
+        // While a new attempt runs, the old error gives way to "Loading…".
+        conn.loading_databases.insert("d_temporary".to_owned());
+        let harness = expanded_database(conn);
+        harness.get_by_label("Loading…");
+        assert!(harness.query_by_label_contains("Could not load").is_none());
     }
 }

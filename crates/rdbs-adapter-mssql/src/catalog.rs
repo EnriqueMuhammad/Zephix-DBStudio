@@ -26,6 +26,62 @@ pub async fn text_rows(
     Ok(rows)
 }
 
+/// How long a catalog read waits for a lock before it gives up (milliseconds).
+const CATALOG_LOCK_TIMEOUT_MS: u32 = 10_000;
+
+/// Prepares the session for catalog reads and returns the batch that undoes it.
+///
+/// Under READ COMMITTED, catalog views wait behind any open transaction that creates,
+/// drops or alters a table (a `SELECT INTO` in a running job is enough), so the explorer
+/// would hang. READ UNCOMMITTED reads past those locks; `LOCK_TIMEOUT` bounds the locks
+/// that are still taken. The session's own isolation level and lock timeout are restored
+/// afterwards, because query tabs share the session.
+pub async fn relax(client: &mut MssqlClient) -> Result<String, DbError> {
+    let rows = text_rows(
+        client,
+        &format!(
+            "SELECT @@LOCK_TIMEOUT, transaction_isolation_level FROM sys.dm_exec_sessions \
+             WHERE session_id = @@SPID; \
+             SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED; \
+             SET LOCK_TIMEOUT {CATALOG_LOCK_TIMEOUT_MS}"
+        ),
+    )
+    .await?;
+    let row = rows.first().map(Vec::as_slice).unwrap_or_default();
+    Ok(restore_sql(&col(row, 0), &col(row, 1)))
+}
+
+/// `SET` batch restoring a lock timeout and an isolation level as reported by
+/// `@@LOCK_TIMEOUT` and `sys.dm_exec_sessions.transaction_isolation_level`.
+fn restore_sql(lock_timeout: &str, isolation: &str) -> String {
+    let lock_timeout = lock_timeout.trim().parse::<i64>().unwrap_or(-1);
+    let isolation = match isolation.trim() {
+        "1" => "READ UNCOMMITTED",
+        "3" => "REPEATABLE READ",
+        "4" => "SERIALIZABLE",
+        "5" => "SNAPSHOT",
+        _ => "READ COMMITTED",
+    };
+    format!("SET LOCK_TIMEOUT {lock_timeout}; SET TRANSACTION ISOLATION LEVEL {isolation}")
+}
+
+/// Runs the batch returned by [`relax`].
+pub async fn restore(client: &mut MssqlClient, sql: &str) -> Result<(), DbError> {
+    text_rows(client, sql).await.map(drop)
+}
+
+/// Explains a lock timeout (error 1222) of a catalog read.
+pub fn lock_hint(mut error: DbError) -> DbError {
+    if error.code.as_deref() == Some("1222") {
+        error.message = format!(
+            "the catalog is locked by another session (for example an open transaction that \
+             creates or changes a table); waited {}s",
+            CATALOG_LOCK_TIMEOUT_MS / 1000
+        );
+    }
+    error
+}
+
 pub(crate) fn col(row: &[Option<String>], i: usize) -> String {
     row.get(i).cloned().flatten().unwrap_or_default()
 }
@@ -60,10 +116,12 @@ pub async fn load(client: &mut MssqlClient) -> Result<Vec<DbObject>, DbError> {
         "SELECT name FROM sys.databases WHERE state = 0 ORDER BY name",
     )
     .await?;
+    // Partition metadata of a table being created or altered stays locked even under
+    // READ UNCOMMITTED; READPAST skips it, so that table shows no row estimate.
     let objects = text_rows(
         client,
         "SELECT s.name, o.name, RTRIM(o.type), \
-                (SELECT SUM(p.rows) FROM sys.partitions p \
+                (SELECT SUM(p.rows) FROM sys.partitions p WITH (READCOMMITTED, READPAST) \
                   WHERE p.object_id = o.object_id AND p.index_id IN (0, 1)) \
          FROM sys.objects o JOIN sys.schemas s ON s.schema_id = o.schema_id \
          WHERE o.is_ms_shipped = 0 AND o.type IN ('U','V','P','FN','IF','TF') \
@@ -172,5 +230,32 @@ mod tests {
         assert_eq!(column_type("varchar", -1, "0", "0"), "varchar(max)");
         assert_eq!(column_type("decimal", 9, "12", "2"), "decimal(12,2)");
         assert_eq!(column_type("int", 4, "10", "0"), "int");
+    }
+
+    #[test]
+    fn restores_session_settings() {
+        assert_eq!(
+            restore_sql("-1", "2"),
+            "SET LOCK_TIMEOUT -1; SET TRANSACTION ISOLATION LEVEL READ COMMITTED"
+        );
+        assert_eq!(
+            restore_sql("5000", "4"),
+            "SET LOCK_TIMEOUT 5000; SET TRANSACTION ISOLATION LEVEL SERIALIZABLE"
+        );
+        assert_eq!(
+            restore_sql("", ""),
+            "SET LOCK_TIMEOUT -1; SET TRANSACTION ISOLATION LEVEL READ COMMITTED"
+        );
+    }
+
+    #[test]
+    fn explains_lock_timeouts() {
+        let e = lock_hint(
+            DbError::new(rdbs_core::DbErrorKind::Query, "Lock request time out").with_code("1222"),
+        );
+        assert!(
+            e.message
+                .starts_with("the catalog is locked by another session")
+        );
     }
 }

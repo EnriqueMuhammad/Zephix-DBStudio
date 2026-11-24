@@ -138,6 +138,15 @@ impl StudioApp {
                 {
                     self.workspace.show_welcome();
                 }
+                if ui
+                    .add(
+                        item(format!("{}  AI Assistant", icon::SPARKLE), &SC_AI_PANEL)
+                            .selected(self.ai.visible),
+                    )
+                    .clicked()
+                {
+                    self.ai.toggle();
+                }
                 ui.separator();
                 ui.menu_button(format!("{}  Theme", icon::PALETTE), |ui| {
                     let current = theme::mode();
@@ -163,9 +172,38 @@ impl StudioApp {
                 {
                     self.run_active_tab(actions);
                 }
+                ui.separator();
+                let (_, cx) = self.ai_context(false);
+                ui.menu_button(format!("{}  Ask AI", icon::SPARKLE), |ui| {
+                    for q in rdbs_core::ai::QuickAsk::ALL {
+                        let enabled =
+                            cx.has_sql && (!q.needs_error() || cx.has_error) && !self.ai.is_busy();
+                        if ui
+                            .add_enabled(enabled, Button::new(q.label()))
+                            .on_hover_text(q.prompt())
+                            .clicked()
+                        {
+                            self.ai_ask(q.prompt().to_owned());
+                        }
+                    }
+                    ui.separator();
+                    if ui.button("AI Providers…").clicked() {
+                        self.ai.open_settings();
+                    }
+                });
             });
             ui.menu_button("Tools", |ui| {
                 self.tools_menu(ui, actions);
+                ui.separator();
+                if ui
+                    .button(format!("{}  Fonts…", icon::TEXT_AA))
+                    .on_hover_text(
+                        "Font and size of the interface, the SQL editor and the results grid",
+                    )
+                    .clicked()
+                {
+                    self.fonts.open_dialog();
+                }
             });
             ui.menu_button("Help", |ui| {
                 if ui
@@ -473,6 +511,13 @@ impl StudioApp {
                 .clicked()
             {
                 actions.push(UiAction::ShowHistory);
+            }
+            if ui
+                .add(ToolbarButton::new(icon::SPARKLE, "AI"))
+                .on_hover_text("AI assistant (Ctrl+Shift+I)")
+                .clicked()
+            {
+                self.ai.toggle();
             }
             ui.separator();
             if ui

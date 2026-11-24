@@ -38,6 +38,10 @@ fake demo data.
   Server connections list SQL Server Agent jobs: history, a CREATE script, and start, stop, enable, and disable.
   Those actions are confirmed on production connections, and Stop is always confirmed. Zephix
   does not edit job steps or schedules.
+- **AI assistant.** Bring your own provider (Anthropic, OpenAI, Gemini, OpenRouter, Groq,
+  DeepSeek, Ollama, LM Studio or any OpenAI-compatible endpoint) to explain, fix and optimise
+  the query in the editor. Keys stay in the OS keychain, result rows are never sent, and
+  suggested SQL is inserted into the editor, never run by itself.
 - **Tools.** CSV/Excel import, schema comparison with a migration script, an ER diagram (SVG
   export), data transfer between servers, table sync (tables and columns, data, or both), a
   visual query builder, and backups on demand or on a schedule.
@@ -69,12 +73,12 @@ Oracle connections need Oracle Instant Client (64-bit) on `PATH`.
 
 ## Install and download
 
-Current release: [v0.4.0](https://github.com/EnriqueMuhammad/Zephix-DBStudio/releases/tag/v0.4.0).
+Current release: [v0.5.0](https://github.com/EnriqueMuhammad/Zephix-DBStudio/releases/tag/v0.5.0).
 
 | Platform | What you get |
 | --- | --- |
-| Windows | `Zephix-0.4.0-x64.msi` (per-user, no administrator rights) or the portable `Zephix-0.4.0-x64.exe` |
-| macOS | `Zephix-0.4.0-arm64.pkg` (Apple silicon) |
+| Windows | `Zephix-0.5.0-x64.msi` (per-user, no administrator rights) or the portable `Zephix-0.5.0-x64.exe` |
+| macOS | `Zephix-0.5.0-arm64.pkg` (Apple silicon) |
 | Linux | Build from source (below). There is no Linux binary in the release. |
 
 Windows packaging notes are in [docs/RELEASING.md](docs/RELEASING.md). Checksums are in

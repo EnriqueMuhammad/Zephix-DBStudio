@@ -25,6 +25,7 @@ fn app_config() -> AppConfig {
             factory: Arc::new(rdbs_adapter_mock::MockAdapterFactory::new()),
             credentials: Arc::new(MemoryCredentials::default()),
             demo_profiles: Some(rdbs_adapter_mock::sample_profiles()),
+            system_fonts: true,
         }
     } else {
         let credentials: Arc<dyn rdbs_core::CredentialStore> =
@@ -35,6 +36,7 @@ fn app_config() -> AppConfig {
             factory: Arc::new(rdbs_drivers::LiveFactory::new(known_hosts)),
             credentials,
             demo_profiles: None,
+            system_fonts: true,
         }
     }
 }

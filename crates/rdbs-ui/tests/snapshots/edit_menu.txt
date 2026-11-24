@@ -19,6 +19,10 @@ Button "\u{eae0}  Cut Ctrl+X" (disabled)
 Button "\u{e1ca}  Copy Ctrl+C" (disabled)
 Button "\u{e198}  Paste Ctrl+V"
 Button "\u{e746}  Select All Ctrl+A"
+Button "\u{e30c}  Find… Ctrl+F"
+Button "\u{e83c}  Replace… Ctrl+H"
+Button "\u{e03e}  Find Next F3"
+Button "\u{e08e}  Find Previous Shift+F3"
 Button "\u{e162}  Comment Selection Ctrl+K, Ctrl+C"
 Button "\u{e160}  Uncomment Selection Ctrl+K, Ctrl+U"
 Button "\u{e164}  Toggle Line Comment Ctrl+/"
